@@ -221,11 +221,17 @@ def format_text(rows, col, target_day=None):
     return text if found else "Занятий нет."
 
 async def main():
-    await broadcast("✅ Бот запущен!")
-    try: await dp.start_polling(bot)
+    # Удаляем вебхуки и старые запросы, чтобы не было конфликтов
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Оповещение админа о запуске
+    try:
+        await bot.send_message(ADMIN_ID, "✅ Бот успешно перезапущен и готов к работе!")
+    except:
+        pass
+
+    try:
+        await dp.start_polling(bot)
     finally:
-        if send_shutdown_notice: await broadcast("⚠️ Бот временно отключен.")
         await bot.session.close()
 
-if __name__ == "__main__":
-    asyncio.run(main())
