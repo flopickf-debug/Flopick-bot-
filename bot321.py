@@ -10,12 +10,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, CallbackQuery
 
-# --- НАСТРОЙКИ ---
-BOT_TOKEN = "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4"
-GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
-SPREADSHEET_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
-CHANNELS = ["@channel1", "@channel2", "@channel3"] 
-DB_FILE = "users.txt"  # Файл, где хранятся ID пользователей
+# --- НАСТРОЙКИ (Берутся из Variables в Railway) ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4")
+
+# КАНАЛЫ (Бот должен быть админом!)
+CHANNELS = ["@loveshaverma", "@channel2", "@channel3"] 
+DB_FILE = "users.txt"
 
 COURSES = {"1 курс": "1 курс", "2 курс": "2 курс", "3 курс": "3 курс", "4 курс": "4 курс"}
 
@@ -35,37 +37,27 @@ class UserState(StatesGroup):
     choosing_group = State()
     choosing_day = State()
 
-# --- РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ---
+# --- ФУНКЦИИ РАССЫЛКИ И БАЗЫ ---
 
 def save_user(user_id):
-    """Сохраняет ID пользователя в файл, если его там нет"""
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, "w") as f: f.write("")
-    
     with open(DB_FILE, "r") as f:
         users = f.read().splitlines()
-    
     if str(user_id) not in users:
-        with open(DB_FILE, "a") as f:
-            f.write(f"{user_id}\n")
-
-def get_all_users():
-    """Возвращает список всех ID пользователей"""
-    if not os.path.exists(DB_FILE): return []
-    with open(DB_FILE, "r") as f:
-        return f.read().splitlines()
+        with open(DB_FILE, "a") as f: f.write(f"{user_id}\n")
 
 async def broadcast(text):
-    """Рассылка сообщения всем пользователям"""
-    users = get_all_users()
+    if not os.path.exists(DB_FILE): return
+    with open(DB_FILE, "r") as f:
+        users = f.read().splitlines()
     for user_id in users:
         try:
             await bot.send_message(user_id, text)
-            await asyncio.sleep(0.05) # Защита от спам-фильтра Telegram
-        except Exception:
-            pass
+            await asyncio.sleep(0.05)
+        except Exception: continue
 
-# --- ПРОВЕРКИ И ТАБЛИЦЫ ---
+# --- ЛОГИКА ТАБЛИЦ И КАБИНЕТОВ ---
 
 async def check_subscriptions(user_id: int):
     for channel in CHANNELS:
@@ -75,13 +67,6 @@ async def check_subscriptions(user_id: int):
         except Exception: continue
     return True
 
-async def get_data_from_google(sheet_name):
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet_name}!A1:BG100?key={GOOGLE_API_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            res = await response.json()
-            return res.get("values", [])
-
 def format_schedule(rows, col_index, target_day=None):
     schedule = ""
     current_day_in_table = ""
@@ -90,13 +75,15 @@ def format_schedule(rows, col_index, target_day=None):
         day_cell = row[0].strip().lower() if len(row) > 0 and row[0].strip() else ""
         if day_cell: current_day_in_table = day_cell
         is_target_day = True if not target_day else target_day.lower() in current_day_in_table.lower()
+        
         if is_target_day:
             subject = row[col_index] if len(row) > col_index else ""
+            # ИСПРАВЛЕННЫЙ ПОИСК КАБИНЕТА (Offset 1, 2, 3)
             room = ""
-            for offset in [1, 2]:
+            for offset in [1, 2, 3]:
                 if len(row) > col_index + offset:
                     val = row[col_index + offset].strip()
-                    if val and val.lower() != "каб":
+                    if val and val.lower() != "каб" and val != "":
                         room = val
                         break
             if subject.strip() and subject.lower() != "предмет":
@@ -104,11 +91,12 @@ def format_schedule(rows, col_index, target_day=None):
                 if day_cell and not target_day:
                     schedule += f"\n🟠 **{current_day_in_table.upper()}**\n"
                 lesson_num = row[1] if len(row) > 1 else "?"
-                room_str = f" (каб. {room})" if room else ""
+                room_str = f" (🚪 каб. {room})" if room else " (🚪 каб. не указан)"
                 schedule += f" - {lesson_num} пара: {subject}{room_str}\n"
     return schedule if found_any else "На этот период занятий не найдено."
 
 # --- КЛАВИАТУРЫ ---
+
 def kb_courses():
     builder = ReplyKeyboardBuilder()
     for course in COURSES.keys(): builder.add(types.KeyboardButton(text=course))
@@ -117,8 +105,7 @@ def kb_courses():
 
 def kb_groups(course_name):
     builder = ReplyKeyboardBuilder()
-    groups = GROUPS_BY_COURSE.get(course_name, [])
-    for group in groups: builder.add(types.KeyboardButton(text=group))
+    for group in GROUPS_BY_COURSE.get(course_name, []): builder.add(types.KeyboardButton(text=group))
     builder.add(types.KeyboardButton(text="⬅️ Назад к курсам"))
     builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
@@ -135,7 +122,7 @@ def kb_days():
 @dp.message(Command("start"))
 @dp.message(F.text == "⬅️ Назад к курсам")
 async def cmd_start(message: types.Message, state: FSMContext):
-    save_user(message.from_user.id) # Сохраняем пользователя в базу
+    save_user(message.from_user.id)
     await state.set_state(UserState.choosing_course)
     await message.answer("Выберите ваш курс:", reply_markup=kb_courses())
 
@@ -145,8 +132,7 @@ async def process_course(message: types.Message, state: FSMContext):
         await state.update_data(selected_course=message.text)
         await state.set_state(UserState.choosing_group)
         await message.answer(f"Выбран {message.text}. Теперь выберите группу:", reply_markup=kb_groups(message.text))
-    else:
-        await message.answer("Пожалуйста, используйте кнопки.")
+    else: await message.answer("Пожалуйста, используйте кнопки.")
 
 @dp.message(UserState.choosing_group)
 async def process_group(message: types.Message, state: FSMContext):
@@ -156,8 +142,7 @@ async def process_group(message: types.Message, state: FSMContext):
         await state.update_data(selected_group=message.text)
         await state.set_state(UserState.choosing_day)
         await message.answer(f"Выбрана группа {message.text}. Какое расписание показать?", reply_markup=kb_days())
-    else:
-        await message.answer("Выберите группу из списка.")
+    else: await message.answer("Выберите группу из списка.")
 
 @dp.message(UserState.choosing_day)
 async def process_schedule(message: types.Message, state: FSMContext):
@@ -173,18 +158,16 @@ async def process_schedule(message: types.Message, state: FSMContext):
     else:
         builder = InlineKeyboardBuilder()
         for i, ch in enumerate(CHANNELS, 1):
-            url = f"https://t.me/{ch.replace('@', '')}"
-            builder.row(InlineKeyboardButton(text=f"Подписаться на Канал {i}", url=url))
+            builder.row(InlineKeyboardButton(text=f"📢 Канал {i}", url=f"https://t.me/{ch.replace('@', '')}"))
         builder.row(InlineKeyboardButton(text="🔄 Проверить подписку", callback_data="check_subs"))
-        await message.answer("🛑 Для доступа подпишитесь на каналы:", reply_markup=builder.as_markup())
+        await message.answer("🛑 Для получения расписания подпишитесь на 3 канала:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data == "check_subs")
 async def callback_check_subs(callback: CallbackQuery, state: FSMContext):
     if await check_subscriptions(callback.from_user.id):
-        await callback.message.edit_text("✅ Успешно! Загружаю расписание...")
+        await callback.message.edit_text("✅ Подписка подтверждена! Загружаю...")
         await send_schedule_data(callback.message, state)
-    else:
-        await callback.answer("❌ Вы подписались не на все каналы!", show_alert=True)
+    else: await callback.answer("❌ Вы подписались не на все каналы!", show_alert=True)
 
 async def send_schedule_data(message_or_callback, state: FSMContext):
     user_data = await state.get_data()
@@ -192,10 +175,14 @@ async def send_schedule_data(message_or_callback, state: FSMContext):
     sheet_name = COURSES[course]
     chat_id = message_or_callback.chat.id if isinstance(message_or_callback, types.Message) else message_or_callback.message.chat.id
     
-    await bot.send_chat_action(chat_id, "typing")
-    rows = await get_data_from_google(sheet_name)
-    if not rows: return await bot.send_message(chat_id, "❌ Ошибка данных.")
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet_name}!A1:BG100?key={GOOGLE_API_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            res = await response.json()
+            rows = res.get("values", [])
 
+    if not rows: return await bot.send_message(chat_id, "❌ Ошибка таблицы.")
+    
     col_idx = -1
     for i, cell in enumerate(rows[1]):
         if group.replace("-","").lower() in cell.replace("-","").lower() and cell != "":
@@ -216,22 +203,15 @@ async def send_schedule_data(message_or_callback, state: FSMContext):
         res = format_schedule(rows, col_idx)
         await bot.send_message(chat_id, f"🗓 **На неделю для {group}:**\n{res}", parse_mode="Markdown")
 
-# --- СТАРТ И СТОП ---
+# --- СТАРТ И ФИНИШ ---
 
 async def main():
-    print("--- БОТ ЗАПУЩЕН ---")
-    # Оповещение при включении
-    await broadcast("✅ Бот снова работает! Можете проверять расписание.")
-    
-    try:
-        await dp.start_polling(bot)
+    await broadcast("✅ Бот снова работает! Приятного использования.")
+    try: await dp.start_polling(bot)
     finally:
-        # Оповещение при выключении
-        print("--- ОПОВЕЩЕНИЕ ОБ ОТКЛЮЧЕНИИ ---")
-        await broadcast("⚠️ Бот временно уходит на тех. обслуживание и скоро вернется.")
+        await broadcast("⚠️ Бот уходит на тех. обслуживание. Скоро вернемся!")
         await bot.session.close()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
+    try: asyncio.run(main())
     except (KeyboardInterrupt, SystemExit): pass
