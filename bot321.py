@@ -16,7 +16,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQ
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4")
 
 # --- АДМИНКА (Вставь свой ID вместо 123456789) ---
-ADMIN_ID = 123456789 
+ADMIN_ID = 879365319
 CHANNELS = ["@channel1", "@channel2", "@channel3"] 
 DB_FILE = "users.txt"
 BLACKLIST_FILE = "blacklist.txt"
@@ -293,3 +293,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
