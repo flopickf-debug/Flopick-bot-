@@ -21,8 +21,8 @@ ADMIN_ID = 879365319
 # СПИСОК КАНАЛОВ ДЛЯ ПОДПИСКИ
 CHANNELS = [
     {"id": "@loveshaverma", "url": "https://t.me/loveshaverma", "name": "Первый канал"},
-    {"id": "@channel_2", "url": "https://t.me/channel_2", "name": "Второй канал"},
-    {"id": "@channel_3", "url": "https://t.me/channel_3", "name": "Третий канал"}
+    {"id": "@loveshaverma", "url": "https://t.me/loveshaverma", "name": "Второй канал"},
+    {"id": "@loveshaverma", "url": "https://t.me/loveshaverma", "name": "Третий канал"}
 ]
 
 DB_FILE = "users.txt"
@@ -224,3 +224,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
