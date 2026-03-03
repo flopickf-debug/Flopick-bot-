@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, KeyboardButton
+from aiogram.types import InlineKeyboardButton, KeyboardButton, FSInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 # --- НАСТРОЙКИ ---
@@ -96,10 +96,14 @@ async def get_schedule(course, group, target_day=None):
         content = row[col].strip() if len(row) > col else ""
         if not content: continue
 
-        # ПОИСК КАБИНЕТА
+        # --- УЛУЧШЕННЫЙ ПОИСК КАБИНЕТА ---
         room = ""
-        if len(row) > col + 1 and row[col+1].strip():
-            room = f" (каб. {row[col+1].strip()})"
+        for offset in range(1, 4): # Проверяем 3 колонки справа
+            if len(row) > col + offset:
+                val = row[col+offset].strip()
+                if val and (val.isdigit() or "каб" in val.lower()):
+                    room = f" (каб. {val})"
+                    break
 
         if not pair_num and curr_day in schedule_dict:
             schedule_dict[curr_day][-1] += f" — {content}{room}"
@@ -113,18 +117,18 @@ async def get_schedule(course, group, target_day=None):
         res += f"\n🟠 **{day}**\n" + "\n".join(lessons) + "\n"
     return res if res else "Занятий нет. 🎉"
 
-# --- АДМИН МЕНЮ ---
+# --- ПОЛНОЕ АДМИН МЕНЮ ---
 @dp.message(Command("admin"), F.from_user.id == ADMIN_ID)
 async def admin_panel(message: types.Message):
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика"))
-    kb.row(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer("🛠 Админ-панель:", reply_markup=kb.as_markup(resize_keyboard=True))
+    kb.row(KeyboardButton(text="📁 Список юзеров"), KeyboardButton(text="⬅️ Назад к курсам"))
+    await message.answer("🛠 **Панель администратора**\nВыберите действие:", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "📢 Рассылка", F.from_user.id == ADMIN_ID)
 async def start_broadcast(message: types.Message, state: FSMContext):
     await state.set_state(AdminState.waiting_for_broadcast)
-    await message.answer("Введите текст для рассылки всем пользователям:")
+    await message.answer("Отправьте сообщение (текст, фото или пост), которое увидят все пользователи:")
 
 @dp.message(AdminState.waiting_for_broadcast, F.from_user.id == ADMIN_ID)
 async def do_broadcast(message: types.Message, state: FSMContext):
@@ -132,17 +136,25 @@ async def do_broadcast(message: types.Message, state: FSMContext):
     count = 0
     for uid in uids:
         try:
-            await bot.send_message(uid, f"🔔 **Объявление:**\n\n{message.text}")
+            await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
             count += 1
             await asyncio.sleep(0.05)
         except: pass
-    await message.answer(f"✅ Рассылка завершена. Получили: {count} чел.")
+    await message.answer(f"✅ Рассылка завершена!\nУспешно отправлено: {count}")
     await state.clear()
+
+@dp.message(F.text == "📁 Список юзеров", F.from_user.id == ADMIN_ID)
+async def export_users(message: types.Message):
+    data = users_worksheet.get_all_values()
+    with open("users_export.txt", "w", encoding="utf-8") as f:
+        for row in data:
+            f.write(" | ".join(row) + "\n")
+    await message.answer_document(FSInputFile("users_export.txt"), caption="Полный список пользователей из БД")
 
 @dp.message(F.text == "📊 Статистика", F.from_user.id == ADMIN_ID)
 async def show_stats(message: types.Message):
-    count = len(users_worksheet.col_values(1)) - 1
-    await message.answer(f"👥 Всего пользователей в базе: {count}")
+    uids = users_worksheet.col_values(1)
+    await message.answer(f"📈 **Статистика бота**\nВсего пользователей: {len(uids)-1}")
 
 # --- ОБЫЧНЫЕ ХЕНДЛЕРЫ ---
 @dp.message(Command("start"), StateFilter('*'))
@@ -151,14 +163,14 @@ async def cmd_start(message: types.Message, state: FSMContext):
     if not await check_subs(message.from_user.id):
         kb = InlineKeyboardBuilder()
         [kb.row(InlineKeyboardButton(text=ch['name'], url=ch['url'])) for ch in CHANNELS]
-        kb.row(InlineKeyboardButton(text="✅ Проверить", callback_data="recheck"))
-        return await message.answer("Подпишитесь на канал!", reply_markup=kb.as_markup())
+        kb.row(InlineKeyboardButton(text="✅ Проверить подписку", callback_data="recheck"))
+        return await message.answer("❗ Подпишитесь на наши каналы для использования бота:", reply_markup=kb.as_markup())
 
     await state.clear()
     await state.set_state(UserState.choosing_course)
     kb = ReplyKeyboardBuilder()
     [kb.add(KeyboardButton(text=c)) for c in GROUPS_BY_COURSE.keys()]
-    await message.answer("🎓 Выберите курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+    await message.answer("🎓 **Выберите ваш курс:**", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "⬅️ Назад к курсам")
 async def back_to_start(message: types.Message, state: FSMContext):
@@ -172,7 +184,7 @@ async def choose_course(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardBuilder()
     [kb.add(KeyboardButton(text=g)) for g in GROUPS_BY_COURSE[message.text]]
     kb.add(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"📍 {message.text}. Выберите группу:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+    await message.answer(f"📍 Курс: {message.text}\nВыберите вашу группу:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
 @dp.message(UserState.choosing_group)
 async def choose_group(message: types.Message, state: FSMContext):
@@ -182,7 +194,7 @@ async def choose_group(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"))
     kb.row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"Группа {message.text}:", reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer(f"👥 Группа: {message.text}\nВыберите период:", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(UserState.choosing_day)
 async def show_res(message: types.Message, state: FSMContext):
@@ -195,18 +207,17 @@ async def show_res(message: types.Message, state: FSMContext):
 
     res = await get_schedule(data['c'], data['g'], target)
     
-    # КНОПКА ОРИГИНАЛА ТАБЛИЦЫ
     url_kb = InlineKeyboardBuilder()
     url_kb.row(InlineKeyboardButton(text="🔗 Оригинал таблицы", url=TABLE_URL))
     
-    await message.answer(f"🗓 **{data['g']}**\n{res}", parse_mode="Markdown", reply_markup=url_kb.as_markup())
+    await message.answer(f"🗓 **Расписание {data['g']}**\n{res}", parse_mode="Markdown", reply_markup=url_kb.as_markup())
 
 @dp.callback_query(F.data == "recheck")
 async def recheck(call: types.CallbackQuery, state: FSMContext):
     if await check_subs(call.from_user.id):
         await call.message.delete()
         await cmd_start(call.message, state)
-    else: await call.answer("❌ Подписка не найдена!", show_alert=True)
+    else: await call.answer("❌ Подписка не подтверждена!", show_alert=True)
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
