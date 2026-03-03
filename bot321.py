@@ -17,10 +17,10 @@ BOT_TOKEN = "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4"
 GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
 SCHEDULE_TABLE_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
 DB_TABLE_ID = "11KbeilP1HRonHQAAZusBS1-ffNo4FxHXa239yZMKJm8"
+ADMIN_ID = 879365319 
 
 CHANNELS = [{"id": "@loveshaverma", "url": "https://t.me/loveshaverma", "name": "Подпишись на канал"}]
 
-# ТВОЙ ПОЛНЫЙ СПИСОК ГРУПП
 GROUPS_BY_COURSE = {
     "1 курс": ["АВМ-110", "ИСП-104", "ИСП-105", "ДОУ-102", "СВП-111", "ОСД-134", "ПКП-121", "СЗС-133", "СРС-111", "ТГО-101", "ТМС-103", "ТОС-103", "ЭМР-107", "ЭМР-108"],
     "2 курс": ["АВМ-208", "ИСП-202", "МПР-202", "ОСД-233", "ПКП-219", "ПКП-220", "СЗС-232", "СРС-209", "ТМС-202", "ТОС-202", "ЭМР-205", "ЮСП-201"],
@@ -37,21 +37,21 @@ class UserState(StatesGroup):
     choosing_group = State()
     choosing_day = State()
 
-# --- ПОДКЛЮЧЕНИЕ К ТАБЛИЦЕ (БЕЗОПАСНОЕ) ---
+class AdminState(StatesGroup):
+    waiting_for_broadcast = State()
+
+# --- ПОДКЛЮЧЕНИЕ К ТАБЛИЦЕ ---
 users_worksheet = None
 try:
-    if os.path.exists("credentials.json"):
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        client = gspread.authorize(creds)
-        db_sheet = client.open_by_key(DB_TABLE_ID)
-        users_worksheet = db_sheet.worksheet("Users")
-        print("✅ Подключено к Google Sheets")
-    else:
-        print("⚠️ Файл credentials.json не найден! Запись в таблицу отключена.")
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    client = gspread.authorize(creds)
+    db_sheet = client.open_by_key(DB_TABLE_ID)
+    users_worksheet = db_sheet.worksheet("Users")
 except Exception as e:
-    print(f"❌ Ошибка Google Sheets: {e}")
+    logging.error(f"Ошибка Google Sheets: {e}")
 
+# --- ФУНКЦИИ ---
 def save_user(user: types.User):
     if users_worksheet is None: return
     try:
@@ -62,6 +62,7 @@ def save_user(user: types.User):
     except: pass
 
 async def check_subs(user_id):
+    if user_id == ADMIN_ID: return True
     for ch in CHANNELS:
         try:
             m = await bot.get_chat_member(ch['id'], user_id)
@@ -69,7 +70,6 @@ async def check_subs(user_id):
         except: return False
     return True
 
-# --- ЛОГИКА РАСПИСАНИЯ ---
 async def get_schedule(course, group, target_day=None):
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
     async with aiohttp.ClientSession() as session:
@@ -77,7 +77,7 @@ async def get_schedule(course, group, target_day=None):
             data = await resp.json()
             rows = data.get("values", [])
     
-    if not rows: return "⚠️ Таблица пуста или недоступна."
+    if not rows: return "⚠️ Таблица пуста."
     
     col = -1
     for i, cell in enumerate(rows[1]):
@@ -95,11 +95,15 @@ async def get_schedule(course, group, target_day=None):
         content = row[col].strip() if len(row) > col else ""
         if not content: continue
 
+        # ПОИСК КАБИНЕТА (смотрим следующую колонку)
+        room = ""
+        if len(row) > col + 1 and row[col+1].strip():
+            room = f" (каб. {row[col+1].strip()})"
+
         if not pair_num and curr_day in schedule_dict:
-            schedule_dict[curr_day][-1] += f" — {content}"
+            schedule_dict[curr_day][-1] += f" — {content}{room}"
             continue
 
-        room = f" (каб. {row[col+1]})" if len(row) > col+1 and row[col+1].strip() else ""
         if curr_day not in schedule_dict: schedule_dict[curr_day] = []
         schedule_dict[curr_day].append(f" - {pair_num if pair_num else '?'} пара: {content}{room}")
 
@@ -108,21 +112,56 @@ async def get_schedule(course, group, target_day=None):
         res += f"\n🟠 **{day}**\n" + "\n".join(lessons) + "\n"
     return res if res else "Занятий нет. 🎉"
 
-# --- ХЕНДЛЕРЫ ---
+# --- АДМИН МЕНЮ ---
+@dp.message(Command("admin"), F.from_user.id == ADMIN_ID)
+async def admin_panel(message: types.Message):
+    kb = ReplyKeyboardBuilder()
+    kb.row(KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика"))
+    kb.row(KeyboardButton(text="⬅️ Назад к курсам"))
+    await message.answer("🛠 Админ-панель:", reply_markup=kb.as_markup(resize_keyboard=True))
+
+@dp.message(F.text == "📢 Рассылка", F.from_user.id == ADMIN_ID)
+async def start_broadcast(message: types.Message, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_broadcast)
+    await message.answer("Введите текст для рассылки всем пользователям:")
+
+@dp.message(AdminState.waiting_for_broadcast, F.from_user.id == ADMIN_ID)
+async def do_broadcast(message: types.Message, state: FSMContext):
+    uids = users_worksheet.col_values(1)[1:] # Берем всех кроме заголовка
+    count = 0
+    for uid in uids:
+        try:
+            await bot.send_message(uid, f"🔔 **Объявление:**\n\n{message.text}")
+            count += 1
+            await asyncio.sleep(0.05)
+        except: pass
+    await message.answer(f"✅ Рассылка завершена. Получили: {count} чел.")
+    await state.clear()
+
+@dp.message(F.text == "📊 Статистика", F.from_user.id == ADMIN_ID)
+async def show_stats(message: types.Message):
+    count = len(users_worksheet.col_values(1)) - 1
+    await message.answer(f"👥 Всего пользователей в базе: {count}")
+
+# --- ОБЫЧНЫЕ ХЕНДЛЕРЫ ---
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(message: types.Message, state: FSMContext):
     save_user(message.from_user)
     if not await check_subs(message.from_user.id):
         kb = InlineKeyboardBuilder()
         [kb.row(InlineKeyboardButton(text=ch['name'], url=ch['url'])) for ch in CHANNELS]
-        kb.row(InlineKeyboardButton(text="✅ Проверить подписку", callback_data="recheck"))
-        return await message.answer("❗ Подпишитесь на канал для доступа:", reply_markup=kb.as_markup())
+        kb.row(InlineKeyboardButton(text="✅ Проверить", callback_data="recheck"))
+        return await message.answer("Подпишитесь на канал!", reply_markup=kb.as_markup())
 
     await state.clear()
     await state.set_state(UserState.choosing_course)
     kb = ReplyKeyboardBuilder()
     [kb.add(KeyboardButton(text=c)) for c in GROUPS_BY_COURSE.keys()]
     await message.answer("🎓 Выберите курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+
+@dp.message(F.text == "⬅️ Назад к курсам")
+async def back_to_start(message: types.Message, state: FSMContext):
+    await cmd_start(message, state)
 
 @dp.message(UserState.choosing_course)
 async def choose_course(message: types.Message, state: FSMContext):
@@ -131,25 +170,22 @@ async def choose_course(message: types.Message, state: FSMContext):
     await state.set_state(UserState.choosing_group)
     kb = ReplyKeyboardBuilder()
     [kb.add(KeyboardButton(text=g)) for g in GROUPS_BY_COURSE[message.text]]
-    kb.add(KeyboardButton(text="⬅️ Назад"))
+    kb.add(KeyboardButton(text="⬅️ Назад к курсам"))
     await message.answer(f"📍 {message.text}. Выберите группу:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
 @dp.message(UserState.choosing_group)
 async def choose_group(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Назад": return await cmd_start(message, state)
+    if message.text == "⬅️ Назад к курсам": return await cmd_start(message, state)
     await state.update_data(g=message.text)
     await state.set_state(UserState.choosing_day)
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"))
-    kb.row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад"))
-    await message.answer(f"Группа {message.text}. На какой день?", reply_markup=kb.as_markup(resize_keyboard=True))
+    kb.row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад к курсам"))
+    await message.answer(f"Группа {message.text}:", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(UserState.choosing_day)
 async def show_res(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Назад":
-        data = await state.get_data()
-        return await choose_course(types.Message(text=data['c'], chat=message.chat, date=message.date), state)
-
+    if message.text == "⬅️ Назад к курсам": return await cmd_start(message, state)
     data = await state.get_data()
     days = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
     target = None
@@ -164,7 +200,7 @@ async def recheck(call: types.CallbackQuery, state: FSMContext):
     if await check_subs(call.from_user.id):
         await call.message.delete()
         await cmd_start(call.message, state)
-    else: await call.answer("❌ Нет подписки!", show_alert=True)
+    else: await call.answer("❌ Подписка не найдена!", show_alert=True)
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
