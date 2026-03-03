@@ -18,6 +18,7 @@ GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
 SCHEDULE_TABLE_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
 DB_TABLE_ID = "11KbeilP1HRonHQAAZusBS1-ffNo4FxHXa239yZMKJm8"
 ADMIN_ID = 879365319 
+TABLE_URL = f"https://docs.google.com/spreadsheets/d/{SCHEDULE_TABLE_ID}/edit"
 
 CHANNELS = [{"id": "@loveshaverma", "url": "https://t.me/loveshaverma", "name": "Подпишись на канал"}]
 
@@ -95,7 +96,7 @@ async def get_schedule(course, group, target_day=None):
         content = row[col].strip() if len(row) > col else ""
         if not content: continue
 
-        # ПОИСК КАБИНЕТА (смотрим следующую колонку)
+        # ПОИСК КАБИНЕТА
         room = ""
         if len(row) > col + 1 and row[col+1].strip():
             room = f" (каб. {row[col+1].strip()})"
@@ -127,7 +128,7 @@ async def start_broadcast(message: types.Message, state: FSMContext):
 
 @dp.message(AdminState.waiting_for_broadcast, F.from_user.id == ADMIN_ID)
 async def do_broadcast(message: types.Message, state: FSMContext):
-    uids = users_worksheet.col_values(1)[1:] # Берем всех кроме заголовка
+    uids = users_worksheet.col_values(1)[1:] 
     count = 0
     for uid in uids:
         try:
@@ -193,7 +194,12 @@ async def show_res(message: types.Message, state: FSMContext):
     elif "Завтра" in message.text: target = days[(datetime.now() + timedelta(days=1)).weekday()]
 
     res = await get_schedule(data['c'], data['g'], target)
-    await message.answer(f"🗓 **{data['g']}**\n{res}", parse_mode="Markdown")
+    
+    # КНОПКА ОРИГИНАЛА ТАБЛИЦЫ
+    url_kb = InlineKeyboardBuilder()
+    url_kb.row(InlineKeyboardButton(text="🔗 Оригинал таблицы", url=TABLE_URL))
+    
+    await message.answer(f"🗓 **{data['g']}**\n{res}", parse_mode="Markdown", reply_markup=url_kb.as_markup())
 
 @dp.callback_query(F.data == "recheck")
 async def recheck(call: types.CallbackQuery, state: FSMContext):
