@@ -3,6 +3,7 @@ import asyncio
 import gspread
 import aiohttp
 import os
+import json
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -41,23 +42,22 @@ class UserState(StatesGroup):
 class AdminState(StatesGroup):
     waiting_for_broadcast = State()
 
-# --- НОВАЯ ЧАСТЬ: ПОДКЛЮЧЕНИЕ С ДИАГНОСТИКОЙ ---
+# --- БЕЗОПАСНОЕ ПОДКЛЮЧЕНИЕ ЧЕРЕЗ ENV VARIABLES ---
 users_worksheet = None
 try:
-    if os.path.exists("credentials.json"):
+    creds_raw = os.environ.get("GOOGLE_CREDS")
+    if creds_raw:
+        creds_info = json.loads(creds_raw)
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
         client = gspread.authorize(creds)
         db_sheet = client.open_by_key(DB_TABLE_ID)
-        try:
-            users_worksheet = db_sheet.worksheet("Users")
-            print("✅ ПОДКЛЮЧЕНО: Таблица найдена, лист 'Users' активен.")
-        except gspread.exceptions.WorksheetNotFound:
-            print("❌ ОШИБКА: Лист с названием 'Users' не найден в вашей таблице!")
+        users_worksheet = db_sheet.worksheet("Users")
+        print("✅ БАЗА ПОДКЛЮЧЕНА: Данные в безопасности!")
     else:
-        print("❌ ОШИБКА: Файл credentials.json не найден в папке бота!")
+        print("⚠️ ПРЕДУПРЕЖДЕНИЕ: Переменная GOOGLE_CREDS не найдена. Проверьте настройки Railway!")
 except Exception as e:
-    print(f"❌ ОШИБКА АВТОРИЗАЦИИ: {e}")
+    print(f"❌ ОШИБКА ПОДКЛЮЧЕНИЯ: {e}")
 
 # --- ФУНКЦИИ ---
 def save_user(user: types.User):
@@ -67,8 +67,7 @@ def save_user(user: types.User):
         existing_ids = users_worksheet.col_values(1)
         if uid not in existing_ids:
             users_worksheet.append_row([uid, f"@{user.username}", datetime.now().strftime("%d.%m.%Y %H:%M")])
-    except Exception as e:
-        logging.error(f"Ошибка записи: {e}")
+    except: pass
 
 async def check_subs(user_id):
     if user_id == ADMIN_ID: return True
@@ -104,12 +103,12 @@ async def get_schedule(course, group, target_day=None):
         content = row[col].strip() if len(row) > col else ""
         if not content: continue
 
-        # --- ИСПРАВЛЕННЫЙ ПОИСК КАБИНЕТА ---
+        # Поиск кабинета (проверяем 3 колонки справа)
         room = ""
         for offset in range(1, 4):
             if len(row) > col + offset:
                 val = row[col+offset].strip()
-                if val and (val.isdigit() or "каб" in val.lower() or len(val) < 5):
+                if val and (val.isdigit() or "каб" in val.lower() or len(val) < 6):
                     room = f" (каб. {val})"
                     break
 
@@ -125,7 +124,7 @@ async def get_schedule(course, group, target_day=None):
         res += f"\n🟠 **{day}**\n" + "\n".join(lessons) + "\n"
     return res if res else "Занятий нет. 🎉"
 
-# --- ПОЛНОЕ АДМИН МЕНЮ ---
+# --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("admin"), F.from_user.id == ADMIN_ID)
 async def admin_panel(message: types.Message):
     kb = ReplyKeyboardBuilder()
@@ -154,6 +153,7 @@ async def start_broadcast(message: types.Message, state: FSMContext):
 
 @dp.message(AdminState.waiting_for_broadcast, F.from_user.id == ADMIN_ID)
 async def do_broadcast(message: types.Message, state: FSMContext):
+    if users_worksheet is None: return
     uids = users_worksheet.col_values(1)[1:] 
     count = 0
     for uid in uids:
@@ -165,21 +165,21 @@ async def do_broadcast(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Готово! Отправлено: {count}")
     await state.clear()
 
-# --- ХЕНДЛЕРЫ ---
+# --- ОБЫЧНЫЕ ХЕНДЛЕРЫ ---
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(message: types.Message, state: FSMContext):
     save_user(message.from_user)
     if not await check_subs(message.from_user.id):
         kb = InlineKeyboardBuilder()
         for ch in CHANNELS: kb.row(InlineKeyboardButton(text=ch['name'], url=ch['url']))
-        kb.row(InlineKeyboardButton(text="✅ Проверить", callback_data="recheck"))
-        return await message.answer("❗ Подпишитесь:", reply_markup=kb.as_markup())
+        kb.row(InlineKeyboardButton(text="✅ Проверить подписку", callback_data="recheck"))
+        return await message.answer("❗ Подпишитесь на канал:", reply_markup=kb.as_markup())
 
     await state.clear()
     await state.set_state(UserState.choosing_course)
     kb = ReplyKeyboardBuilder()
     for c in GROUPS_BY_COURSE.keys(): kb.add(KeyboardButton(text=c))
-    await message.answer("🎓 Выберите курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+    await message.answer("🎓 Выберите ваш курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "⬅️ Назад к курсам")
 async def back_to_start(message: types.Message, state: FSMContext):
@@ -193,7 +193,7 @@ async def choose_course(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardBuilder()
     for g in GROUPS_BY_COURSE[message.text]: kb.add(KeyboardButton(text=g))
     kb.add(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"📍 Группа:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+    await message.answer(f"📍 Выберите группу:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
 @dp.message(UserState.choosing_group)
 async def choose_group(message: types.Message, state: FSMContext):
@@ -203,7 +203,7 @@ async def choose_group(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"))
     kb.row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"Выберите день:", reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer(f"📅 Выберите период:", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(UserState.choosing_day)
 async def show_res(message: types.Message, state: FSMContext):
@@ -217,7 +217,7 @@ async def show_res(message: types.Message, state: FSMContext):
     res = await get_schedule(data['c'], data['g'], target)
     
     url_kb = InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔗 Оригинал таблицы", url=TABLE_URL))
-    await message.answer(f"🗓 **{data['g']}**\n{res}", parse_mode="Markdown", reply_markup=url_kb.as_markup())
+    await message.answer(f"🗓 **Расписание {data['g']}**\n{res}", parse_mode="Markdown", reply_markup=url_kb.as_markup())
 
 @dp.callback_query(F.data == "recheck")
 async def recheck(call: types.CallbackQuery, state: FSMContext):
