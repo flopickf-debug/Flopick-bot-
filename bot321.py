@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardButton, KeyboardButton, FSInputFile
+from aiogram.types import InlineKeyboardButton, KeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 # =========================================================
@@ -33,9 +33,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# =========================================================
-# БЛОК 2: СОСТОЯНИЯ (FSM)
-# =========================================================
 class UserState(StatesGroup):
     choosing_course = State()
     choosing_group = State()
@@ -44,18 +41,14 @@ class UserState(StatesGroup):
 
 class AdminState(StatesGroup):
     waiting_for_broadcast = State()
-    waiting_for_new_admin = State()
-    waiting_for_del_admin = State()
-    waiting_for_channel = State()
-    waiting_for_del_channel = State()
 
 # =========================================================
-# БЛОК 3: ТАБЛИЦЫ
+# БЛОК 2: ТАБЛИЦЫ
 # =========================================================
-users_ws = None; settings_ws = None; channels_ws = None; admins_ws = None
+users_ws = None; admins_ws = None
 
 def init_sheets():
-    global users_ws, settings_ws, channels_ws, admins_ws
+    global users_ws, admins_ws
     try:
         creds_json = os.environ.get("GOOGLE_CREDS")
         if not creds_json: return
@@ -65,8 +58,6 @@ def init_sheets():
         client = gspread.authorize(creds)
         db_sheet = client.open_by_key(DB_TABLE_ID)
         users_ws = db_sheet.worksheet("Users")
-        settings_ws = db_sheet.worksheet("Settings")
-        channels_ws = db_sheet.worksheet("Channels")
         admins_ws = db_sheet.worksheet("Admins")
     except Exception as e: logging.error(f"Sheets error: {e}")
 
@@ -76,12 +67,8 @@ async def get_admins():
     try: return [int(i) for i in admins_ws.col_values(1) if i.isdigit()] if admins_ws else [OWNER_ID]
     except: return [OWNER_ID]
 
-async def is_sub_on():
-    try: return settings_ws.cell(1, 2).value == "on" if settings_ws else True
-    except: return True
-
 # =========================================================
-# БЛОК 4: ФУНКЦИИ ПАРСИНГА
+# БЛОК 3: ЛОГИКА «СКЛЕИВАНИЯ» СТРОК (ПРЕДМЕТ + УЧИТЕЛЬ)
 # =========================================================
 async def fetch_schedule(course, group, target_day=None):
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
@@ -89,25 +76,55 @@ async def fetch_schedule(course, group, target_day=None):
         async with session.get(url) as resp:
             data = await resp.json()
             rows = data.get("values", [])
+    
     if not rows: return "⚠️ Таблица пуста."
     col_idx = next((i for i, cell in enumerate(rows[1]) if group.lower() in cell.lower()), -1)
     if col_idx == -1: return f"⚠️ Группа {group} не найдена."
-    res_dict, curr_day = {}, ""
-    for row in rows[2:]:
-        if len(row) > 0 and row[0].strip(): curr_day = row[0].strip().upper()
-        if not curr_day or (target_day and target_day.upper() not in curr_day): continue
+    
+    res_dict = {}
+    curr_day = ""
+    
+    # Идем по строкам. r_idx - индекс в списке rows
+    for i in range(2, len(rows)):
+        row = rows[i]
+        # Определяем день
+        if len(row) > 0 and row[0].strip():
+            curr_day = row[0].strip().upper()
+        
+        if not curr_day: continue
+        if target_day and target_day.upper() not in curr_day: continue
+        
         content = row[col_idx].strip() if len(row) > col_idx else ""
-        if content and content not in ["-", "", "."]:
-            pair_num = row[1] if len(row) > 1 else "?"
-            room = f" [каб. {row[col_idx+1].strip()}]" if len(row) > col_idx + 1 and row[col_idx+1].strip() else ""
+        pair_num = row[1].strip() if len(row) > 1 else ""
+        
+        # Если есть номер пары и какой-то текст (предмет)
+        if pair_num and content and content not in ["-", "."]:
+            # Проверяем строку ниже: вдруг там фамилия учителя?
+            teacher = ""
+            room = ""
+            if i + 1 < len(rows):
+                next_row = rows[i+1]
+                next_content = next_row[col_idx].strip() if len(next_row) > col_idx else ""
+                # Если на след. строке нет номера пары, значит это продолжение текущей (учитель)
+                next_pair = next_row[1].strip() if len(next_row) > 1 else ""
+                if not next_pair and next_content:
+                    teacher = f" ({next_content})"
+                    # Кабинет обычно в колонке справа от учителя или предмета
+                    if len(next_row) > col_idx + 1 and next_row[col_idx+1].strip():
+                        room = f" — каб. {next_row[col_idx+1].strip()}"
+                    elif len(row) > col_idx + 1 and row[col_idx+1].strip():
+                        room = f" — каб. {row[col_idx+1].strip()}"
+
             if curr_day not in res_dict: res_dict[curr_day] = []
-            res_dict[curr_day].append(f"• {pair_num} пара: {content}{room}")
+            res_dict[curr_day].append(f"• {pair_num} пара: **{content}**{teacher}{room}")
+
     output = ""
     for d, l in res_dict.items(): output += f"\n📅 **{d}**\n" + "\n".join(l) + "\n"
     return output if output else "🎉 Занятий нет!"
 
 async def search_teacher(name):
-    name, results = name.lower().strip(), []
+    name = name.lower().strip()
+    results = []
     async with aiohttp.ClientSession() as session:
         for course in ["1 курс", "2 курс", "3 курс", "4 курс"]:
             url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
@@ -117,94 +134,30 @@ async def search_teacher(name):
             if not rows: continue
             gr_row = rows[1]
             curr_day = ""
-            for row in rows[2:]:
+            for i, row in enumerate(rows[2:], 2):
                 if len(row) > 0 and row[0].strip(): curr_day = row[0].strip()
-                pair = row[1] if len(row) > 1 else "?"
                 for c_idx, cell in enumerate(row):
                     if c_idx >= 2 and name in cell.lower():
+                        # Нашли фамилию. Пытаемся найти предмет строкой ВЫШЕ
+                        subject = "Предмет неизв."
+                        pair = row[1] if row[1].strip() else "???"
+                        if i > 0:
+                            prev_row = rows[i-1]
+                            if prev_row[c_idx].strip(): subject = prev_row[c_idx].strip()
+                            if not pair.strip() and prev_row[1].strip(): pair = prev_row[1].strip()
+                        
                         g = gr_row[c_idx] if len(gr_row) > c_idx else "?"
-                        rm = f" (каб. {row[c_idx+1]})" if len(row) > c_idx+1 and row[c_idx+1].strip() else ""
-                        results.append(f"📅 {curr_day} | {pair} пара | Гр: {g}{rm}")
+                        rm = f" [каб. {row[c_idx+1]}]" if len(row) > c_idx+1 and row[c_idx+1].strip() else ""
+                        results.append(f"📅 {curr_day} | {pair} п. | **{subject}** | Гр: {g}{rm}")
     return "\n".join(results) if results else "❌ Не найдено."
 
 # =========================================================
-# БЛОК 5: АДМИН ПАНЕЛЬ (ПОЛНАЯ ЛОГИКА)
-# =========================================================
-@dp.message(Command("admin"))
-async def admin_menu(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    if user_id not in await get_admins(): return
-    await state.clear()
-    kb = ReplyKeyboardBuilder()
-    kb.row(KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика"))
-    if user_id == OWNER_ID:
-        status = "ВКЛ" if await is_sub_on() else "ВЫКЛ"
-        kb.row(KeyboardButton(text=f"✅ Подписка: {status}"))
-        kb.row(KeyboardButton(text="➕ Админ"), KeyboardButton(text="➖ Админ"))
-        kb.row(KeyboardButton(text="➕ Канал"), KeyboardButton(text="🗑 Канал"))
-    kb.row(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer("🛠 **Полная админ-панель**", reply_markup=kb.as_markup(resize_keyboard=True))
-
-# 1. Рассылка
-@dp.message(F.text == "📢 Рассылка")
-async def start_broad(message: types.Message, state: FSMContext):
-    if message.from_user.id not in await get_admins(): return
-    await state.set_state(AdminState.waiting_for_broadcast)
-    await message.answer("Введите текст сообщения для всех (или 'Отмена'):", reply_markup=ReplyKeyboardBuilder().add(KeyboardButton(text="Отмена")).as_markup(resize_keyboard=True))
-
-@dp.message(AdminState.waiting_for_broadcast)
-async def do_broad(message: types.Message, state: FSMContext):
-    if message.text == "Отмена": return await admin_menu(message, state)
-    ids = users_ws.col_values(1) if users_ws else []
-    ok = 0
-    for uid in ids:
-        try:
-            await bot.send_message(uid, message.text)
-            ok += 1
-            await asyncio.sleep(0.05)
-        except: pass
-    await message.answer(f"✅ Готово! Получили: {ok}")
-    await admin_menu(message, state)
-
-# 2. Управление админами
-@dp.message(F.text == "➕ Админ", F.from_user.id == OWNER_ID)
-async def add_adm_st(message: types.Message, state: FSMContext):
-    await state.set_state(AdminState.waiting_for_new_admin)
-    await message.answer("Пришлите ID нового админа:", reply_markup=ReplyKeyboardBuilder().add(KeyboardButton(text="Отмена")).as_markup(resize_keyboard=True))
-
-@dp.message(AdminState.waiting_for_new_admin)
-async def add_adm_fin(message: types.Message, state: FSMContext):
-    if message.text != "Отмена" and message.text.isdigit():
-        admins_ws.append_row([message.text])
-        await message.answer(f"✅ {message.text} теперь админ!")
-    await admin_menu(message, state)
-
-# 3. Управление каналами
-@dp.message(F.text == "➕ Канал", F.from_user.id == OWNER_ID)
-async def add_chan_st(message: types.Message, state: FSMContext):
-    await state.set_state(AdminState.waiting_for_channel)
-    await message.answer("Формат: `ID | Ссылка | Название`", parse_mode="Markdown")
-
-@dp.message(AdminState.waiting_for_channel)
-async def add_chan_fin(message: types.Message, state: FSMContext):
-    try:
-        data = [i.strip() for i in message.text.split("|")]
-        if len(data) == 3: channels_ws.append_row(data); await message.answer("✅ Добавлен!")
-    except: pass
-    await admin_menu(message, state)
-
-# =========================================================
-# БЛОК 6: СТУДЕНТЫ И УЧИТЕЛЯ
+# БЛОК 4: ОБРАБОТЧИКИ
 # =========================================================
 @dp.message(Command("start"), StateFilter('*'))
 @dp.message(F.text == "⬅️ Назад к курсам")
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
-    # Регистрация юзера
-    try:
-        if users_ws and not users_ws.find(str(message.from_user.id)):
-            users_ws.append_row([str(message.from_user.id), message.from_user.full_name, datetime.now().strftime("%d.%m.%Y")])
-    except: pass
     kb = ReplyKeyboardBuilder()
     for c in GROUPS_BY_COURSE.keys(): kb.add(KeyboardButton(text=c))
     kb.row(KeyboardButton(text="👨‍🏫 Я преподаватель"))
@@ -239,7 +192,7 @@ async def show_res(message: types.Message, state: FSMContext):
     if "Сегодня" in message.text: t = days[datetime.now().weekday()]
     elif "Завтра" in message.text: t = days[(datetime.now() + timedelta(days=1)).weekday()]
     res = await fetch_schedule(data['c'], data['g'], t)
-    await message.answer(f"📋 {data['g']}\n{res}", parse_mode="Markdown")
+    await message.answer(f"📋 **{data['g']}**\n{res}", parse_mode="Markdown")
 
 @dp.message(UserState.waiting_for_teacher_name)
 async def teacher_res(message: types.Message, state: FSMContext):
