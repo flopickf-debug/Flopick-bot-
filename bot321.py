@@ -17,8 +17,6 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 BOT_TOKEN = "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4"
 GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
 SCHEDULE_TABLE_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
-DB_TABLE_ID = "11KbeilP1HRonHQAAZusBS1-ffNo4FxHXa239yZMKJm8"
-OWNER_ID = 879365319 
 
 GROUPS_BY_COURSE = {
     "1 курс": ["АВМ-110", "ИСП-104", "ИСП-105", "ДОУ-102", "СВП-111", "ОСД-134", "ПКП-121", "СЗС-133", "СРС-111", "ТГО-101", "ТМС-103", "ТОС-103", "ЭМР-107", "ЭМР-108"],
@@ -36,19 +34,15 @@ class UserState(StatesGroup):
     choosing_group = State()
     choosing_day = State()
 
-# --- БЕЗОПАСНЫЙ ПОИСК КАБИНЕТА ---
-def safe_get_cab(rows, r_idx, c_idx):
+# --- ФУНКЦИЯ ИЗВЛЕЧЕНИЯ КАБИНЕТА ---
+def get_room_value(row, col_idx):
+    """Безопасно берет значение из следующей колонки"""
     try:
-        # Проверяем ячейку справа в текущей строке
-        if r_idx < len(rows) and len(rows[r_idx]) > c_idx + 1:
-            val = rows[r_idx][c_idx + 1].strip()
-            if val and val not in ["-", ".", "каб"]: return val
-            
-        # Проверяем ячейку справа в строке ниже (где учитель)
-        if r_idx + 1 < len(rows) and len(rows[r_idx + 1]) > c_idx + 1:
-            val = rows[r_idx + 1][c_idx + 1].strip()
-            if val and val not in ["-", ".", "каб"]: return val
-    except Exception:
+        if len(row) > col_idx + 1:
+            val = row[col_idx + 1].strip()
+            if val and val.lower() not in ["-", ".", "каб"]:
+                return val
+    except:
         pass
     return ""
 
@@ -62,96 +56,106 @@ async def fetch_schedule(course, group, target_day=None):
     
     if not rows: return "⚠️ Таблица пуста."
     
-    # Ищем колонку группы (строка 2 в таблице, индекс 1 в коде)
+    # Ищем индекс колонки группы (обычно строка 2)
     col_idx = -1
-    if len(rows) > 1:
-        for i, cell in enumerate(rows[1]):
-            if group.lower() in cell.lower():
-                col_idx = i
-                break
+    for r_idx in [1, 2, 0]: # Проверяем первые три строки на всякий случай
+        if len(rows) > r_idx:
+            for i, cell in enumerate(rows[r_idx]):
+                if group.lower() in cell.lower():
+                    col_idx = i
+                    break
+        if col_idx != -1: break
             
     if col_idx == -1: return f"⚠️ Группа {group} не найдена."
     
     res_dict, curr_day = {}, ""
+    
     for i in range(2, len(rows)):
         row = rows[i]
-        # Обработка дня недели (колонка A)
+        
+        # Обновляем день недели (колонка A)
         if len(row) > 0 and row[0].strip():
-            day_raw = row[0].replace('\n', ' ').strip().upper()
-            if any(word in day_raw for word in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]):
-                curr_day = day_raw
+            day_text = row[0].replace('\n', ' ').strip().upper()
+            if any(x in day_text for x in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]):
+                curr_day = day_text
         
-        if not curr_day or (target_day and target_day.upper() not in curr_day): continue
-        
-        # Номер пары (колонка B, индекс 1)
+        if not curr_day or (target_day and target_day.upper() not in curr_day):
+            continue
+            
+        # Номер пары (колонка B / индекс 1)
         pair_num = row[1].strip() if len(row) > 1 else ""
         content = row[col_idx].strip() if len(row) > col_idx else ""
         
-        # Если нашли предмет
+        # Если нашли название предмета
         if pair_num and content and content not in ["-", ".", "№", "Ден"]:
+            # Ищем учителя (строка ниже)
             teacher = ""
-            # Учитель на строку ниже в той же колонке
-            if i + 1 < len(rows) and len(rows[i+1]) > col_idx:
-                t_val = rows[i+1][col_idx].strip()
-                if t_val: teacher = f" ({t_val})"
+            room = get_room_value(row, col_idx) # Кабинет может быть в строке с предметом
             
-            # Кабинет
-            room = safe_get_cab(rows, i, col_idx)
-            room_str = f" — **каб. {room}**" if room else ""
-            
-            if curr_day not in res_dict: res_dict[curr_day] = []
-            res_dict[curr_day].append(f"• {pair_num} пара: {content}{teacher}{room_str}")
+            if i + 1 < len(rows):
+ следующая_строка = строки[i+основной]
+ t_val = следующая_строка[col_idx].полоска() если лен(следующая_строка) > col_idx еще ""
+                если т_вал:
+ учитель = ф" ({т_вал})"
+                    # Если в строке выше кабинета не было, ищем в строке учителя
+                    если нет комната:
+ комната = получить_значение_комнаты(следующая_строка, col_idx)
 
-    output = ""
-    for d, lessons in res_dict.items():
-        output += f"\n📅 **{d}**\n" + "\n".join(lessons) + "\n"
-    return output if output else "🎉 Занятий нет!"
+ room_str = f" — **каб. {комната}**" если комната еще ""
+            
+            если текущий_день нет в res_dict: res_dict[текущий_день] = []
+ res_dict[текущий_день].добавить(ф"• {число_пар} пара: {содержание}{учитель}{room_str}")
+
+ выход = ""
+    для г, уроки в res_dict.предметы():
+ выход += ф"\н📅 **{d}**\н" + "\н".присоединиться(уроки) + "\н"
+    возвращаться вывод если вывод еще "🎉 Занятий нет!"
 
 # --- ОБРАБОТЧИКИ ---
-@dp.message(Command("start"), StateFilter('*'))
-@dp.message(F.text == "⬅️ Назад к курсам")
-async def start_cmd(message: types.Message, state: FSMContext):
-    await state.clear()
-    kb = ReplyKeyboardBuilder()
-    for c in GROUPS_BY_COURSE.keys(): kb.add(KeyboardButton(text=c))
-    kb.row(KeyboardButton(text="👨‍🏫 Я преподаватель"))
-    await state.set_state(UserState.choosing_course)
-    await message.answer("🎓 Выберите курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+@dp.сообщение(Команда("старт"), Фильтр состояний('*'))
+@dp.сообщение(Ф.текст == "⬅️ Назад к курсам")
+асинхронный деф start_cmd(сообщение: типы.Сообщение, состояние: FSMContext):
+    ждать состояние.прозрачный()
+ кб = ОтветитьKeyboardBuilder()
+    для c в ГРУППЫ_ПО_КУРСУ.ключи(): кб.добавлять(КлавиатураКнопка(текст=с))
+ кб.ряд(КлавиатураКнопка(текст="👨‍🏫 Я преподаватель"))
+    ждать состояние.установить_состояние(Состояние пользователя.выбор_курса)
+    ждать сообщение.отвечать("🎓 Выберите курс:", reply_markup=кб.регулировать(2).как_разметка(изменить размер_клавиатуры=Истинный))
 
-@dp.message(UserState.choosing_course)
-async def proc_course(message: types.Message, state: FSMContext):
-    if message.text == "👨‍🏫 Я преподаватель":
-        return await message.answer("📝 Введите фамилию (в разработке)")
-    if message.text not in GROUPS_BY_COURSE: return
-    await state.update_data(c=message.text); await state.set_state(UserState.choosing_group)
-    kb = ReplyKeyboardBuilder()
-    for g in GROUPS_BY_COURSE[message.text]: kb.add(KeyboardButton(text=g))
-    kb.row(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"📍 {message.text}. Группа:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+@dp.сообщение(Состояние пользователя.выбор_курса)
+асинхронный деф proc_course(сообщение: типы.Сообщение, состояние: FSMContext):
+    если сообщение.текст == "👨‍🏫 Я преподаватель":
+        возвращаться ждать сообщение.отвечать("Введите фамилию учителя:")
+    если сообщение.текст нет в ГРУППЫ_ПО_КУРСУ: возвращаться
+    ждать состояние.обновить_данные(с=сообщение.текст); ждать состояние.установить_состояние(Состояние пользователя.выбираем_группу)
+ кб = ОтветитьKeyboardBuilder()
+    для g в ГРУППЫ_ПО_КУРСУ[сообщение.текст]: кб.добавлять(КлавиатураКнопка(текст=г))
+ кб.ряд(КлавиатураКнопка(текст="⬅️ Назад к курсам"))
+    ждать сообщение.отвечать(ф"📍 {сообщение.текст}. . Группа:", reply_markup=кб.регулировать(2).как_разметка(изменить размер_клавиатуры=Истинный))
 
-@dp.message(UserState.choosing_group)
-async def proc_group(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Назад к курсам": return await start_cmd(message, state)
-    await state.update_data(g=message.text); await state.set_state(UserState.choosing_day)
-    kb = ReplyKeyboardBuilder().row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"))
-    kb.row(KeyboardButton(text="🗓 На всю неделю"), KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"🕒 Группа {message.text}:", reply_markup=kb.as_markup(resize_keyboard=True))
+@dp.сообщение(Состояние пользователя.выбираем_группу)
+асинхронный деф proc_group(сообщение: типы.Сообщение, состояние: FSMContext):
+    если сообщение.текст == "⬅️ Назад к курсам": возвращаться ждать start_cmd(сообщение, состояние)
+    ждать состояние.обновить_данные(г=сообщение.текст); ждать состояние.установить_состояние(Состояние пользователя.выбор_дня)
+ кб = ОтветитьKeyboardBuilder().ряд(КлавиатураКнопка(текст="📅 Сегодня"), КлавиатураКнопка(текст="📅 Завтра"))
+ кб.ряд(КлавиатураКнопка(текст="🗓 На всю неделю"), КлавиатураКнопка(текст="⬅️ Назад к курсам"))
+    ждать сообщение.отвечать(ф"🕒 Группа {сообщение.текст}:", reply_markup=кб.как_разметка(изменить размер_клавиатуры=Истинный))
 
-@dp.message(UserState.choosing_day)
-async def proc_day(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Назад к курсам": return await start_cmd(message, state)
-    data = await state.get_data()
-    days = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
-    t = None
-    if "Сегодня" in message.text: t = days[datetime.now().weekday()]
-    elif "Завтра" in message.text: t = days[(datetime.now() + timedelta(days=1)).weekday()]
+@dp.сообщение(Состояние пользователя.выбор_дня)
+асинхронный деф proc_day(сообщение: типы.Сообщение, состояние: FSMContext):
+    если сообщение.текст == "⬅️ Назад к курсам": возвращаться ждать start_cmd(сообщение, состояние)
+ данные = ждать состояние.получить_данные()
+ дней = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
+ т = Нет
+    если "Сегодня" в сообщение.текст: t = дни[дата и время.сейчас().будний день()]
+    Элиф "Завтра" в сообщение.текст: t = дни[(дата и время.сейчас() + timedelta(дней=1)).будний день()]
     
-    res = await fetch_schedule(data['c'], data['g'], t)
-    await message.answer(f"📋 **{data['g']}**\n{res}", parse_mode="Markdown")
+ рез = ждать fetch_schedule(данные['с'], данные['г'], т)
+    ждать сообщение.отвечать(ф"📋 **{данные['г']}**\н{рез}", режим_анализа="Маркдаун")
 
-async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+асинхронный деф основной():
+    ждать бот.удалить_вебхук(drop_pending_updates=Истинный)
+    ждать дп.старт_опроса(бот)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+если __имя__ == "__основной__":
+ асинсио.бегать(основной())
