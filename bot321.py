@@ -34,7 +34,24 @@ class UserState(StatesGroup):
     waiting_for_teacher = State()
     admin_broadcast = State()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- СИСТЕМА БАЗЫ ДАННЫХ (РЕГИСТРАЦИЯ) ---
+async def get_all_users():
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{DB_TABLE_ID}/values/Sheet1!A:A?key={GOOGLE_API_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+            rows = data.get("values", [])
+            return [str(row[0]) for row in rows if row and str(row[0]).isdigit()]
+
+async def register_user_logic(user_id):
+    """
+    Для полноценной ЗАПИСИ в Google Таблицу через API нужен сервисный аккаунт (.json файл).
+    Если ты используешь только API KEY, запись невозможна (только чтение).
+    Пока выводим лог, но если у тебя есть gspread и creds.json — скажи, я добавлю код записи.
+    """
+    logging.info(f"Регистрация пользователя {user_id}")
+
+# --- ПОИСК КАБИНЕТА ---
 def get_room_safe(rows, r_idx, c_idx):
     try:
         if r_idx < 0 or r_idx >= len(rows): return ""
@@ -42,19 +59,47 @@ def get_room_safe(rows, r_idx, c_idx):
         for offset in range(1, 4):
             if len(row) > c_idx + offset:
                 val = str(row[c_idx + offset]).strip()
-                if val and val.lower() not in ["-", ".", "каб"]: return val
+                if val and val.lower() not in ["-", ".", "каб", "пара"]: return val
     except: pass
     return ""
 
-async def get_all_users():
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{DB_TABLE_ID}/values/Sheet1!A:A?key={GOOGLE_API_KEY}"
+# --- ЛОГИКА ПАРСИНГА ---
+async def fetch_student_schedule(course, group, target_day=None):
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             data = await resp.json()
             rows = data.get("values", [])
-            return [row[0] for row in rows if row and str(row[0]).isdigit()]
+    if not rows: return "⚠️ Таблица пуста."
+    col_idx = -1
+    for r in range(min(5, len(rows))):
+        for i, cell in enumerate(rows[r]):
+            if group.lower() in str(cell).lower(): col_idx = i; break
+        if col_idx != -1: break
+    if col_idx == -1: return f"⚠️ Группа {group} не найдена."
+    res_dict, curr_day = {}, ""
+    for i in range(len(rows)):
+        row = rows[i]
+        if not row: continue
+        if len(row) > 0 and str(row[0]).strip():
+            day_val = str(row[0]).replace('\n', ' ').strip().upper()
+            if any(d in day_val for d in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]): curr_day = day_val
+        if not curr_day or (target_day and target_day.upper() not in curr_day): continue
+        pair_num = row[1].strip() if len(row) > 1 else ""
+        content = str(row[col_idx]).strip() if len(row) > col_idx else ""
+        if pair_num and content and content not in ["-", ".", "№", "Ден"]:
+            teacher = ""
+            if i + 1 < len(rows) and len(rows[i+1]) > col_idx:
+                t_val = str(rows[i+1][col_idx]).strip()
+                teacher = f" ({t_val})" if t_val else ""
+            room = get_room_safe(rows, i, col_idx)
+            if curr_day not in res_dict: res_dict[curr_day] = []
+            res_dict[curr_day].append(f"• {pair_num} пара: {content}{teacher} — каб. {room}")
+    output = ""
+    for d, lessons in res_dict.items():
+        output += f"\n📅 **{d}**\n" + "\n".join(lessons) + "\n"
+    return output if output else "🎉 Занятий нет!"
 
-# --- ПОИСК ДЛЯ ПРЕПОДАВАТЕЛЯ (ИСПРАВЛЕННЫЙ) ---
 async def fetch_teacher_schedule(teacher_name):
     all_lessons = []
     t_name_lower = teacher_name.lower()
@@ -62,108 +107,68 @@ async def fetch_teacher_schedule(teacher_name):
         for course in GROUPS_BY_COURSE.keys():
             url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
             async with session.get(url) as resp:
-                data = await resp.json()
-                rows = data.get("values", [])
-            
+                data = await resp.json(); rows = data.get("values", [])
             if len(rows) < 3: continue
             curr_day = ""
             for i in range(2, len(rows)):
                 row = rows[i]
                 if not row: continue
-                
-                # День недели
                 if len(row) > 0 and str(row[0]).strip():
                     day_cand = str(row[0]).replace('\n', ' ').strip().upper()
-                    if any(d in day_cand for d in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]):
-                        curr_day = day_cand
-                
+                    if any(d in day_cand for d in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]): curr_day = day_cand
                 if not curr_day: continue
-                
-                # ИСПРАВЛЕННЫЙ ЦИКЛ (бывшая 130 линия)
                 for col_idx in range(2, len(row)):
-                    cell_raw = row[col_idx] if col_idx < len(row) else None
-                    if cell_raw:
-                        cell_val = str(cell_raw).strip().lower()
-                        if t_name_lower in cell_val and len(cell_val) > 2:
-                            p = row[1] if len(row) > 1 else "?"
-                            s = rows[i-1][col_idx] if i > 0 and len(rows[i-1]) > col_idx else "?"
-                            g = rows[1][col_idx] if len(rows[1]) > col_idx else "?"
-                            r = get_room_safe(rows, i-1, col_idx)
-                            all_lessons.append(f"📅 **{curr_day}**\n{p} пара: {s} — {g} [каб. {r}]")
-    
+                    cell_val = str(row[col_idx]).strip().lower()
+                    if t_name_lower in cell_val and len(cell_val) > 2:
+                        p = row[1] if len(row) > 1 else "?"
+                        s = rows[i-1][col_idx] if i > 0 and len(rows[i-1]) > col_idx else "?"
+                        g = rows[1][col_idx] if len(rows[1]) > col_idx else "?"
+                        r = get_room_safe(rows, i-1, col_idx)
+                        all_lessons.append(f"📅 **{curr_day}**\n{p} пара: {s} — {g} [каб. {r}]")
     return "\n\n".join(all_lessons) if all_lessons else "🔍 Ничего не найдено."
 
-# --- ЛОГИКА СТУДЕНТА ---
-async def fetch_student_schedule(course, group, target_day=None):
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
-            rows = data.get("values", [])
-    
-    if not rows: return "⚠️ Таблица пуста."
-    col_idx = -1
-    for r in range(min(5, len(rows))):
-        for i, cell in enumerate(rows[r]):
-            if group.lower() in str(cell).lower():
-                col_idx = i; break
-        if col_idx != -1: break
-            
-    if col_idx == -1: return f"⚠️ Группа {group} не найдена."
-    
-    res_dict, curr_day = {}, ""
-    for i in range(len(rows)):
-        row = rows[i]
-        if not row: continue
-        if len(row) > 0 and str(row[0]).strip():
-            day_val = str(row[0]).replace('\n', ' ').strip().upper()
-            if any(d in day_val for d in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]):
-                curr_day = day_val
-        
-        if not curr_day or (target_day and target_day.upper() not in curr_day): continue
-        
-        pair_num = row[1].strip() if len(row) > 1 else ""
-        content = str(row[col_idx]).strip() if len(row) > col_idx else ""
-        
-        if pair_num and content and content not in ["-", ".", "№", "Ден"]:
-            teacher = ""
-            if i + 1 < len(rows) and len(rows[i+1]) > col_idx:
-                t_val = str(rows[i+1][col_idx]).strip()
-                if t_val: teacher = f" ({t_val})"
-            
-            room = get_room_safe(rows, i, col_idx)
-            if curr_day not in res_dict: res_dict[curr_day] = []
-            res_dict[curr_day].append(f"• {pair_num} пара: {content}{teacher} — каб. {room}")
-
-    output = ""
-    for d, lessons in res_dict.items():
-        output += f"\n📅 **{d}**\n" + "\n".join(lessons) + "\n"
-    return output if output else "🎉 Занятий нет!"
-
-# --- АДМИН ПАНЕЛЬ ---
+# --- РАСШИРЕННАЯ АДМИН ПАНЕЛЬ ---
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != OWNER_ID: return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")]
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"), 
+         InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Список ID (5 шт)", callback_data="admin_user_list"),
+         InlineKeyboardButton(text="📡 Проверить связь", callback_data="admin_check")],
+        [InlineKeyboardButton(text="🧹 Сброс FSM", callback_data="admin_reset")]
     ])
-    await message.answer("🛠 **Панель администратора**", reply_markup=kb)
+    await message.answer("🛠 **ГЛАВНОЕ МЕНЮ АДМИНИСТРАТОРА**", reply_markup=kb)
 
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: types.CallbackQuery):
-    users = await get_all_users()
-    await callback.message.answer(f"📊 Всего пользователей в базе: **{len(users)}**")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_broadcast")
-async def broadcast_step1(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(UserState.admin_broadcast)
-    await callback.message.answer("📝 Введите текст для рассылки:")
+@dp.callback_query(F.data.startswith("admin_"))
+async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
+    action = callback.data.split("_")[1]
+    
+    if action == "stats":
+        users = await get_all_users()
+        await callback.message.answer(f"📊 Всего в базе: **{len(users)}** чел.")
+    
+    elif action == "user": # Список последних
+        users = await get_all_users()
+        await callback.message.answer(f"👥 Последние ID:\n`{', '.join(users[-5:])}`", parse_mode="Markdown")
+        
+    elif action == "broadcast":
+        await state.set_state(UserState.admin_broadcast)
+        await callback.message.answer("📝 Введите текст рассылки:")
+        
+    elif action == "check":
+        async with aiohttp.ClientSession() as s:
+            r1 = await s.get(f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}?key={GOOGLE_API_KEY}")
+            await callback.message.answer(f"📡 Расписание: {'✅ OK' if r1.status == 200 else '❌ Ошибка'}")
+            
+    elif action == "reset":
+        await state.clear()
+        await callback.message.answer("🧹 Состояния сброшены.")
+    
     await callback.answer()
 
 @dp.message(UserState.admin_broadcast)
-async def broadcast_step2(message: types.Message, state: FSMContext):
+async def process_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
     users = await get_all_users()
     await message.answer(f"🚀 Рассылка на {len(users)} чел...")
@@ -176,14 +181,15 @@ async def broadcast_step2(message: types.Message, state: FSMContext):
         except: pass
     await message.answer(f"✅ Готово. Получили: {c}")
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБЫЧНЫЕ ОБРАБОТЧИКИ ---
 @dp.message(Command("start"), StateFilter('*'))
 @dp.message(F.text == "⬅️ Назад")
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
+    await register_user_logic(message.from_user.id) # Логируем вход
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="🎓 Я студент"), KeyboardButton(text="👨‍🏫 Я преподаватель"))
-    await message.answer("Кто вы?", reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer("Добро пожаловать! Кто вы?", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "👨‍🏫 Я преподаватель")
 async def teacher_mode(message: types.Message, state: FSMContext):
