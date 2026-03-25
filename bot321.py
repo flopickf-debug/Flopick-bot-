@@ -18,10 +18,9 @@ BOT_TOKEN = "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4"
 GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
 SCHEDULE_TABLE_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
 DB_TABLE_ID = "11KbeilP1HRonHQAAZusBS1-ffNo4FxHXa239yZMKJm8"
-ADMIN_ID = 879365319 
-TABLE_URL = f"https://docs.google.com/spreadsheets/d/{SCHEDULE_TABLE_ID}/edit"
 
-CHANNELS = [{"id": "@loveshaverma", "url": "https://t.me/loveshaverma", "name": "Подпишись на канал"}]
+OWNER_ID = 879365319 # ГЛАВНЫЙ АДМИН
+TABLE_URL = f"https://docs.google.com/spreadsheets/d/{SCHEDULE_TABLE_ID}/edit"
 
 GROUPS_BY_COURSE = {
     "1 курс": ["АВМ-110", "ИСП-104", "ИСП-105", "ДОУ-102", "СВП-111", "ОСД-134", "ПКП-121", "СЗС-133", "СРС-111", "ТГО-101", "ТМС-103", "ТОС-103", "ЭМР-107", "ЭМР-108"],
@@ -44,10 +43,15 @@ class AdminState(StatesGroup):
     waiting_for_broadcast = State()
     waiting_for_ban = State()
     waiting_for_unban = State()
+    waiting_for_channel = State()
+    waiting_for_new_admin = State()
 
-# --- ПОДКЛЮЧЕНИЕ К БАЗЕ ---
+# --- ПОДКЛЮЧЕНИЕ К GOOGLE SHEETS ---
 users_worksheet = None
 blacklist_worksheet = None
+settings_worksheet = None
+channels_worksheet = None
+admins_worksheet = None
 
 try:
     creds_raw = os.environ.get("GOOGLE_CREDS")
@@ -59,37 +63,47 @@ try:
         db_sheet = client.open_by_key(DB_TABLE_ID)
         users_worksheet = db_sheet.worksheet("Users")
         blacklist_worksheet = db_sheet.worksheet("Blacklist")
-        print("✅ БАЗА ДАННЫХ ПОДКЛЮЧЕНА")
+        settings_worksheet = db_sheet.worksheet("Settings")
+        channels_worksheet = db_sheet.worksheet("Channels")
+        admins_worksheet = db_sheet.worksheet("Admins")
+        print("✅ ВСЕ ТАБЛИЦЫ УСПЕШНО ПОДКЛЮЧЕНЫ")
     else:
-        print("⚠️ ОШИБКА: Переменная GOOGLE_CREDS не найдена!")
+        print("⚠️ ОШИБКА: Переменная GOOGLE_CREDS пуста!")
 except Exception as e:
     print(f"❌ ОШИБКА ПОДКЛЮЧЕНИЯ: {e}")
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-async def is_banned(user: types.User):
-    if blacklist_worksheet is None: return False
+async def get_admins_ids():
     try:
-        all_banned = blacklist_worksheet.col_values(1)
+        uids = admins_worksheet.col_values(1)
+        return [int(uid) for uid in uids if uid.isdigit()]
+    except: return [OWNER_ID]
+
+async def get_sub_settings():
+    try: return settings_worksheet.cell(1, 2).value == "on"
+    except: return True
+
+async def get_channels():
+    try: return channels_worksheet.get_all_values()
+    except: return []
+
+async def is_banned(user: types.User):
+    try:
+        banned = blacklist_worksheet.col_values(1)
         uid = str(user.id)
-        username = f"@{user.username}".lower() if user.username else "none"
-        return uid in all_banned or username in [u.lower() for u in all_banned]
+        uname = f"@{user.username}".lower() if user.username else "none"
+        return uid in banned or uname in [u.lower() for u in banned]
     except: return False
 
-def save_user(user: types.User):
-    if users_worksheet is None: return
-    try:
-        uid = str(user.id)
-        if uid not in users_worksheet.col_values(1):
-            users_worksheet.append_row([uid, f"@{user.username}", datetime.now().strftime("%d.%m.%Y %H:%M")])
-    except: pass
-
 async def check_subs(user_id):
-    if user_id == ADMIN_ID: return True
-    for ch in CHANNELS:
+    if user_id in await get_admins_ids(): return True
+    if not await get_sub_settings(): return True
+    channels = await get_channels()
+    for row in channels:
         try:
-            m = await bot.get_chat_member(ch['id'], user_id)
+            m = await bot.get_chat_member(row[0], user_id)
             if m.status not in ["member", "administrator", "creator"]: return False
-        except: return False
+        except: continue
     return True
 
 async def get_schedule(course, group, target_day=None):
@@ -98,14 +112,11 @@ async def get_schedule(course, group, target_day=None):
         async with session.get(url) as resp:
             data = await resp.json()
             rows = data.get("values", [])
-    
     if not rows: return "⚠️ Таблица пуста."
     col = -1
     for i, cell in enumerate(rows[1]):
-        if group.lower() in cell.lower():
-            col = i; break
+        if group.lower() in cell.lower(): col = i; break
     if col == -1: return f"⚠️ Группа {group} не найдена."
-
     schedule_dict, curr_day = {}, ""
     for row in rows[2:]:
         day_val = row[0].strip().upper() if len(row) > 0 and row[0].strip() else ""
@@ -114,168 +125,185 @@ async def get_schedule(course, group, target_day=None):
         pair_num = row[1].strip() if len(row) > 1 else ""
         content = row[col].strip() if len(row) > col else ""
         if not content: continue
-
         room = ""
         for offset in range(1, 4):
             if len(row) > col + offset:
                 val = row[col+offset].strip()
                 if val and (val.isdigit() or "каб" in val.lower() or len(val) < 6):
-                    room = f" (каб. {val})"
-                    break
-
+                    room = f" (каб. {val})"; break
         if not pair_num and curr_day in schedule_dict:
             schedule_dict[curr_day][-1] += f" — {content}{room}"
-            continue
-        if curr_day not in schedule_dict: schedule_dict[curr_day] = []
-        schedule_dict[curr_day].append(f" - {pair_num if pair_num else '?'} пара: {content}{room}")
-
+        else:
+            if curr_day not in schedule_dict: schedule_dict[curr_day] = []
+            schedule_dict[curr_day].append(f" - {pair_num if pair_num else '?'} пара: {content}{room}")
     res = ""
     for day, lessons in schedule_dict.items():
         res += f"\n🟠 **{day}**\n" + "\n".join(lessons) + "\n"
     return res if res else "Занятий нет. 🎉"
 
-# --- АДМИН ПАНЕЛЬ ---
-@dp.message(Command("admin"), F.from_user.id == ADMIN_ID)
+# --- АДМИН-ПАНЕЛЬ ---
+@dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
+    all_admins = await get_admins_ids()
+    if message.from_user.id not in all_admins: return
+
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика"))
     kb.row(KeyboardButton(text="🚫 Забанить"), KeyboardButton(text="✅ Разбанить"))
-    kb.row(KeyboardButton(text="📁 Список юзеров"), KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer("🛠 **Панель администратора**", reply_markup=kb.as_markup(resize_keyboard=True))
-
-@dp.message(F.text == "🚫 Забанить", F.from_user.id == ADMIN_ID)
-async def admin_ban_start(message: types.Message, state: FSMContext):
-    await state.set_state(AdminState.waiting_for_ban)
-    await message.answer("Введите **ID** или **Username** (с @) для бана:")
-
-@dp.message(AdminState.waiting_for_ban, F.from_user.id == ADMIN_ID)
-async def admin_ban_finish(message: types.Message, state: FSMContext):
-    if blacklist_worksheet:
-        target = message.text.strip()
-        blacklist_worksheet.append_row([target])
-        await message.answer(f"🚫 Пользователь `{target}` заблокирован.")
-    await state.clear()
-
-@dp.message(F.text == "✅ Разбанить", F.from_user.id == ADMIN_ID)
-async def admin_unban_start(message: types.Message, state: FSMContext):
-    await state.set_state(AdminState.waiting_for_unban)
-    await message.answer("Введите **ID** или **Username** для разбана:")
-
-@dp.message(AdminState.waiting_for_unban, F.from_user.id == ADMIN_ID)
-async def admin_unban_finish(message: types.Message, state: FSMContext):
-    if blacklist_worksheet:
-        target = message.text.strip()
-        try:
-            cell = blacklist_worksheet.find(target)
-            if cell:
-                blacklist_worksheet.delete_rows(cell.row)
-                await message.answer(f"✅ Пользователь `{target}` разблокирован.")
-            else:
-                await message.answer("Не найден в списке.")
-        except: await message.answer("Ошибка таблицы.")
-    await state.clear()
-
-@dp.message(F.text == "📁 Список юзеров", F.from_user.id == ADMIN_ID)
-async def export_users(message: types.Message):
-    if users_worksheet:
-        data = users_worksheet.get_all_values()
-        with open("users.txt", "w", encoding="utf-8") as f:
-            for r in data: f.write(" | ".join(r) + "\n")
-        await message.answer_document(FSInputFile("users.txt"))
-
-@dp.message(F.text == "📊 Статистика", F.from_user.id == ADMIN_ID)
-async def show_stats(message: types.Message):
-    if users_worksheet:
-        count = len(users_worksheet.col_values(1)) - 1
-        await message.answer(f"📈 Всего пользователей: {count}")
-
-@dp.message(F.text == "📢 Рассылка", F.from_user.id == ADMIN_ID)
-async def start_broadcast(message: types.Message, state: FSMContext):
-    await state.set_state(AdminState.waiting_for_broadcast)
-    await message.answer("Отправьте сообщение для рассылки:")
-
-@dp.message(AdminState.waiting_for_broadcast, F.from_user.id == ADMIN_ID)
-async def do_broadcast(message: types.Message, state: FSMContext):
-    uids = users_worksheet.col_values(1)[1:] 
-    count = 0
-    for uid in uids:
-        try:
-            await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
-            count += 1
-            await asyncio.sleep(0.05)
-        except: pass
-    await message.answer(f"✅ Отправлено: {count}")
-    await state.clear()
-
-# --- ОСНОВНЫЕ ОБРАБОТЧИКИ ---
-@dp.message(Command("start"), StateFilter('*'))
-async def cmd_start(message: types.Message, state: FSMContext):
-    if await is_banned(message.from_user):
-        return await message.answer("🚫 Вы заблокированы.")
     
-    save_user(message.from_user)
-    if not await check_subs(message.from_user.id):
-        kb = InlineKeyboardBuilder()
-        for ch in CHANNELS: kb.row(InlineKeyboardButton(text=ch['name'], url=ch['url']))
-        kb.row(InlineKeyboardButton(text="✅ Проверить", callback_data="recheck"))
-        return await message.answer("❗ Подпишитесь на канал:", reply_markup=kb.as_markup())
+    if message.from_user.id == OWNER_ID:
+        is_on = await get_sub_settings()
+        sub_btn = "✅ Обяз. подписка: ВКЛ" if is_on else "❌ Обяз. подписка: ВЫКЛ"
+        kb.row(KeyboardButton(text=sub_btn))
+        kb.row(KeyboardButton(text="➕ Назначить админа"), KeyboardButton(text="➖ Снять админа"))
+        kb.row(KeyboardButton(text="➕ Добавить канал"), KeyboardButton(text="🗑 Удалить канал"))
+        kb.row(KeyboardButton(text="📁 Список юзеров"))
+    
+    kb.row(KeyboardButton(text="⬅️ Назад к курсам"))
+    await message.answer("🛠 **Панель управления**", reply_markup=kb.as_markup(resize_keyboard=True))
 
+# --- ОБРАБОТЧИКИ OWNER (ГЛАВНЫЙ) ---
+@dp.message(F.text.contains("Обяз. подписка:"), F.from_user.id == OWNER_ID)
+async def toggle_subs(message: types.Message):
+    current = await get_sub_settings()
+    settings_worksheet.update_cell(1, 2, "off" if current else "on")
+    await admin_panel(message)
+
+@dp.message(F.text == "➕ Назначить админа", F.from_user.id == OWNER_ID)
+async def add_adm_start(message: types.Message, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_new_admin)
+    await message.answer("Введите ID нового админа:")
+
+@dp.message(AdminState.waiting_for_new_admin, F.from_user.id == OWNER_ID)
+async def add_adm_end(message: types.Message, state: FSMContext):
+    if message.text.isdigit():
+        admins_worksheet.append_row([message.text])
+        await message.answer(f"✅ {message.text} теперь админ.")
     await state.clear()
-    await state.set_state(UserState.choosing_course)
-    kb = ReplyKeyboardBuilder()
-    for c in GROUPS_BY_COURSE.keys(): kb.add(KeyboardButton(text=c))
-    await message.answer("🎓 Курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
-@dp.message(F.text == "⬅️ Назад к курсам")
-async def back_to_start(message: types.Message, state: FSMContext):
-    await cmd_start(message, state)
+@dp.message(F.text == "➖ Снять админа", F.from_user.id == OWNER_ID)
+async def rem_adm_menu(message: types.Message):
+    ids = await get_admins_ids()
+    kb = InlineKeyboardBuilder()
+    for uid in ids:
+        if uid != OWNER_ID: kb.row(InlineKeyboardButton(text=f"Удалить {uid}", callback_data=f"ra:{uid}"))
+    await message.answer("Кого снять?", reply_markup=kb.as_markup())
 
-@dp.message(UserState.choosing_course)
-async def choose_course(message: types.Message, state: FSMContext):
-    if await is_banned(message.from_user): return
-    if message.text not in GROUPS_BY_COURSE: return
-    await state.update_data(c=message.text)
-    await state.set_state(UserState.choosing_group)
-    kb = ReplyKeyboardBuilder()
-    for g in GROUPS_BY_COURSE[message.text]: kb.add(KeyboardButton(text=g))
-    kb.add(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"📍 Группа:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+@dp.callback_query(F.data.startswith("ra:"), F.from_user.id == OWNER_ID)
+async def rem_adm_confirm(call: types.CallbackQuery):
+    try:
+        cell = admins_worksheet.find(call.data.split(":")[1])
+        admins_worksheet.delete_rows(cell.row)
+        await call.answer("Удалено")
+    except: await call.answer("Ошибка")
 
-@dp.message(UserState.choosing_group)
-async def choose_group(message: types.Message, state: FSMContext):
-    if await is_banned(message.from_user): return
-    if message.text == "⬅️ Назад к курсам": return await cmd_start(message, state)
-    await state.update_data(g=message.text)
-    await state.set_state(UserState.choosing_day)
-    kb = ReplyKeyboardBuilder()
-    kb.row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"))
-    kb.row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"📅 День:", reply_markup=kb.as_markup(resize_keyboard=True))
+@dp.message(F.text == "➕ Добавить канал", F.from_user.id == OWNER_ID)
+async def add_ch_start(message: types.Message, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_channel)
+    await message.answer("Формат: `@id | ссылка | Название`")
 
-@dp.message(UserState.choosing_day)
-async def show_res(message: types.Message, state: FSMContext):
-    if await is_banned(message.from_user): return
-    if message.text == "⬅️ Назад к курсам": return await cmd_start(message, state)
-    data = await state.get_data()
-    days = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
-    target = None
-    if "Сегодня" in message.text: target = days[datetime.now().weekday()]
-    elif "Завтра" in message.text: target = days[(datetime.now() + timedelta(days=1)).weekday()]
+@dp.message(AdminState.waiting_for_channel, F.from_user.id == OWNER_ID)
+async def add_ch_end(message: types.Message, state: FSMContext):
+    try:
+        channels_worksheet.append_row([p.strip() for p in message.text.split("|")])
+        await message.answer("✅ Добавлено")
+    except: await message.answer("❌ Ошибка")
+    await state.clear()
 
-    res = await get_schedule(data['c'], data['g'], target)
-    url_kb = InlineKeyboardBuilder().row(InlineKeyboardButton(text="🔗 Таблица", url=TABLE_URL))
-    await message.answer(f"🗓 **{data['g']}**\n{res}", parse_mode="Markdown", reply_markup=url_kb.as_markup())
+@dp.message(F.text == "🗑 Удалить канал", F.from_user.id == OWNER_ID)
+async def del_ch_menu(message: types.Message):
+    chs = await get_channels()
+    kb = InlineKeyboardBuilder()
+    for i, r in enumerate(chs): kb.row(InlineKeyboardButton(text=f"Удалить {r[2]}", callback_data=f"dc:{i+1}"))
+    await message.answer("Что удалить?", reply_markup=kb.as_markup())
 
-@dp.callback_query(F.data == "recheck")
-async def recheck(call: types.CallbackQuery, state: FSMContext):
-    if await check_subs(call.from_user.id):
-        await call.message.delete()
-        await cmd_start(call.message, state)
-    else: await call.answer("❌ Нет подписки!", show_alert=True)
+@dp.callback_query(F.data.startswith("dc:"), F.from_user.id == OWNER_ID)
+async def del_ch_confirm(call: types.CallbackQuery):
+    channels_worksheet.delete_rows(int(call.data.split(":")[1]))
+    await call.answer("Удалено")
 
-async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+# --- ОБРАБОТЧИКИ ДЛЯ ВСЕХ АДМИНОВ ---
+@dp.message(F.text == "🚫 Забанить", F.from_user.id.in_(await get_admins_ids()))
+async def ban_start(message: types.Message, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_ban)
+    await message.answer("Кого в ЧС?")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.message(AdminState.waiting_for_ban)
+async def ban_end(message: types.Message, state: FSMContext):
+    blacklist_worksheet.append_row([message.text.strip()])
+    await message.answer("🚫 Забанен")
+    await state.clear()
+
+@dp.message(F.text == "📢 Рассылка", F.from_user.id.in_(await get_admins_ids()))
+async def br_start(message: types.Message, state: FSMContext):
+    await state.set_state(AdminState.waiting_for_broadcast)
+    await message.answer("Текст рассылки:")
+
+@dp.message(AdminState.waiting_for_broadcast)
+async def br_end(message: types.Message, state: FSMContext):
+    uids = users_worksheet.col_values(1)[1:]
+    for uid in uids:
+        try: await bot.copy_message(uid, message.chat.id, message.message_id); await asyncio.sleep(0.05)
+        кроме: проходить
+ ждать сообщение.отвечать("📢 Готово!")
+ ждать состояние.прозрачный()
+
+# --- СТАРТ И ОСНОВНОЕ ---
+@дп.сообщенье(Команда("старт"), Фильтр состояний('*'))
+асинхронный деф cmd_start(сообщение: типы.Сообщение, сообщение: FSMContext):
+ если ждать is_banned(сообщение.от_пользователя): возвращаться ждать сообщение.отвечать("🚫 Вы в ЧС.")
+ пытаться:
+ если стр(сообщение.от_пользователя.идентификатор) нет в рабочий лист_пользователей.значения_столбцов(1):
+ рабочий лист_пользователей.добавить_строку([стр(сообщение.от_пользователя.идентификатор), ф"@{сообщение.от_пользователя.имя пользователя}", дата и время.сейчас().время страйфтайма("%д.%м.%Y %H:%M")])
+ кроме: проходить
+ если нет ждать check_subs(сообщение.от_пользователя.идентификатор):
+ чс = ждать получить_каналы()
+ кб = InlineKeyboardBuilder()
+ для р в чс: кб.ряд(Кнопка встроенной клавиатуры(текст=р[2], URL=r[1]))
+ кб.ряд(Кнопка встроенной клавиатуры(текст="✅ Проверить", данные_обратного вызова="перепроверить"))
+ возвращаться ждать сообщение.отвечать("❗ Подпишись:", reply_markup=кб.как_разметка())
+ ждать состояние.прозрачный(); ждать состояние.установить_состояние(Состояние пользователя.выбор_курса)
+ кб = ОтветитьKeyboardBuilder()
+ для с в ГРУППИ_ПО_КУРСУ.ключи(): кб.добавлять(КлавиатураКнопка(текст=с))
+ ждать сообщение.отвечать("🎓 Курс:", reply_markup=кб.регулировать(2).как_разметка(изменить размер_клавиатуры=Истинный))
+
+@дп.сообщенье(Ф.текст == "⬅️ Назад к курсам")
+асинхронный деф назад(сообщение: типы.Сообщение, сообщение: FSMContext): ждать cmd_start(сообщение, состояние)
+
+@дп.сообщенье(Состояние пользователя.выбор_курса)
+асинхронный деф курс(сообщение: типы.Сообщение, сообщение: FSMContext):
+ если сообщение.текст нет в ГРУППЫ_ПО_КУРСУ: возвращаться
+ ждать состояние.обновить_данные(с=сообщение.текст); ждать состояние.установить_состояние(Состояние пользователя.выбираем_группу)
+ кб = ОтветитьKeyboardBuilder()
+ для г в ГРУППЫ_ПО_КУРСУ[сообщение.текст]: кб.добавлять(КлавиатураКнопка(текст=г))
+ кб.добавлять(КлавиатураКнопка(текст="⬅️ Назад к курсам"))
+ ждать сообщение.отвечать("📍 Группа:", reply_markup=кб.регулировать(2).как_разметка(изменить размер_клавиатуры=Истинный))
+
+@дп.сообщенье(Состояние пользователя.выбираем_группу)
+асинхронный деф группа(сообщение: типы.Сообщение, сообщение: FSMContext):
+ если сообщение.текст == "⬅️ Назад к курсам": возвращаться ждать cmd_start(сообщение, состояние)
+ ждать состояние.обновить_данные(г=сообщение.текст); ждать состояние.установить_состояние(Состояние пользователя.выбор_дня)
+ кб = ОтветитьKeyboardBuilder()
+ кб.ряд(КлавиатураКнопка(текст="📅 Сегодня"), КлавиатураКнопка(текст="📅 Завтра"))
+ кб.ряд(КлавиатураКнопка(текст="🗓 На неделю"), КлавиатураКнопка(текст="⬅️ Назад к курсам"))
+ ждать сообщение.отвечать("📅 Период:", reply_markup=кб.как_разметка(изменить размер_клавиатуры=Истинный))
+
+@дп.сообщенье(Состояние пользователя.выбор_дня)
+асинхронный деф результат(сообщение: типы.Сообщение, сообщение: FSMContext):
+ если сообщение.текст == "⬅️ Назад к курсам": возвращаться ждать cmd_start(сообщение, состояние)
+ данные = ждать состояние.получить_данные(); дни = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
+ цель = дни[дата и время.сейчас().будний день()] если "Сегодня" в сообщение.текст еще дней[(дата и время.сейчас() + timedelta(дней=1)).будний день()] если "Завтра" в сообщение.текст еще Нет
+ рез = ждать получить_расписание(данные['с'], данные['г'], цель)
+ ждать сообщение.отвечать(ф"🗓 **{данные['г']}**\н{рез}", режим_анализа="Маркдаун")
+
+@dp.callback_query(Ф.данные == "перепроверить")
+асинхронный день перепроверить(вызов: типы.CallbackQuery, сообщение: FSMContext):
+ если ждать check_subs(вызов.от_пользовода.идентификар): ждать вызов.сообщение.удалить(); ждatь cmd_start(вызов.сообщение, государство)
+ еще: ждать вызов.отвечать("❌ Подписки нет!", показать_оповещение=Истинный)
+
+асинхронный деф основной():
+ ждать бот.удалить_вебхук(drop_pending_updates=Истинный)
+ ждать дп.старт_опроса(бот)
+
+если __имя__ == "__основной__":
+ асинсио.бегать(основной())
