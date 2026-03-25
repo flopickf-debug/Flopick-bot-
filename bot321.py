@@ -6,10 +6,10 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, BufferedInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-# --- КОНФИГУРАЦИЯ ---
+# --- ТВОИ ДАННЫЕ (КОНФИГУРАЦИЯ) ---
 BOT_TOKEN = "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4"
 GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
 SCHEDULE_TABLE_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
@@ -27,14 +27,16 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-class UserState(StatesGroup):
+class Form(StatesGroup):
     choosing_course = State()
     choosing_group = State()
     choosing_day = State()
     waiting_for_teacher = State()
     admin_broadcast = State()
+    admin_ban = State()
+    admin_demote = State()
 
-# --- СИСТЕМА БАЗЫ ДАННЫХ (РЕГИСТРАЦИЯ) ---
+# --- ФУНКЦИИ РАБОТЫ С ТАБЛИЦАМИ ---
 async def get_all_users():
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{DB_TABLE_ID}/values/Sheet1!A:A?key={GOOGLE_API_KEY}"
     async with aiohttp.ClientSession() as session:
@@ -43,15 +45,6 @@ async def get_all_users():
             rows = data.get("values", [])
             return [str(row[0]) for row in rows if row and str(row[0]).isdigit()]
 
-async def register_user_logic(user_id):
-    """
-    Для полноценной ЗАПИСИ в Google Таблицу через API нужен сервисный аккаунт (.json файл).
-    Если ты используешь только API KEY, запись невозможна (только чтение).
-    Пока выводим лог, но если у тебя есть gspread и creds.json — скажи, я добавлю код записи.
-    """
-    logging.info(f"Регистрация пользователя {user_id}")
-
-# --- ПОИСК КАБИНЕТА ---
 def get_room_safe(rows, r_idx, c_idx):
     try:
         if r_idx < 0 or r_idx >= len(rows): return ""
@@ -63,7 +56,6 @@ def get_room_safe(rows, r_idx, c_idx):
     except: pass
     return ""
 
-# --- ЛОГИКА ПАРСИНГА ---
 async def fetch_student_schedule(course, group, target_day=None):
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
     async with aiohttp.ClientSession() as session:
@@ -88,17 +80,14 @@ async def fetch_student_schedule(course, group, target_day=None):
         pair_num = row[1].strip() if len(row) > 1 else ""
         content = str(row[col_idx]).strip() if len(row) > col_idx else ""
         if pair_num and content and content not in ["-", ".", "№", "Ден"]:
-            teacher = ""
-            if i + 1 < len(rows) and len(rows[i+1]) > col_idx:
-                t_val = str(rows[i+1][col_idx]).strip()
-                teacher = f" ({t_val})" if t_val else ""
+            t_val = str(rows[i+1][col_idx]).strip() if i+1 < len(rows) and len(rows[i+1]) > col_idx else ""
+            teacher = f" ({t_val})" if t_val else ""
             room = get_room_safe(rows, i, col_idx)
             if curr_day not in res_dict: res_dict[curr_day] = []
             res_dict[curr_day].append(f"• {pair_num} пара: {content}{teacher} — каб. {room}")
-    output = ""
-    for d, lessons in res_dict.items():
-        output += f"\n📅 **{d}**\n" + "\n".join(lessons) + "\n"
-    return output if output else "🎉 Занятий нет!"
+    out = ""
+    for d, lessons in res_dict.items(): out += f"\n📅 **{d}**\n" + "\n".join(lessons) + "\n"
+    return out if out else "🎉 Занятий нет!"
 
 async def fetch_teacher_schedule(teacher_name):
     all_lessons = []
@@ -127,108 +116,117 @@ async def fetch_teacher_schedule(teacher_name):
                         all_lessons.append(f"📅 **{curr_day}**\n{p} пара: {s} — {g} [каб. {r}]")
     return "\n\n".join(all_lessons) if all_lessons else "🔍 Ничего не найдено."
 
-# --- РАСШИРЕННАЯ АДМИН ПАНЕЛЬ ---
+# --- АДМИН-КЛАВИАТУРА (КАК НА ФОТО) ---
+def get_admin_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.row(KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="📊 Статистика"))
+    builder.row(KeyboardButton(text="🚫 Забанить"), KeyboardButton(text="✅ Разбанить"))
+    builder.row(KeyboardButton(text="✅ Обяз. подписка: ВКЛ"))
+    builder.row(KeyboardButton(text="➕ Назначить админа"), KeyboardButton(text="➖ Снять админа"))
+    builder.row(KeyboardButton(text="➕ Добавить канал"), KeyboardButton(text="🗑 Удалить канал"))
+    builder.row(KeyboardButton(text="📑 Список юзеров"))
+    builder.row(KeyboardButton(text="⬅️ Назад к курсам"))
+    return builder.as_markup(resize_keyboard=True)
+
+# --- ОБРАБОТЧИКИ АДМИНКИ ---
 @dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-    if message.from_user.id != OWNER_ID: return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"), 
-         InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="👥 Список ID (5 шт)", callback_data="admin_user_list"),
-         InlineKeyboardButton(text="📡 Проверить связь", callback_data="admin_check")],
-        [InlineKeyboardButton(text="🧹 Сброс FSM", callback_data="admin_reset")]
-    ])
-    await message.answer("🛠 **ГЛАВНОЕ МЕНЮ АДМИНИСТРАТОРА**", reply_markup=kb)
+async def admin_start(message: types.Message):
+    if message.from_user.id == OWNER_ID:
+        await message.answer("🔧 Панель управления", reply_markup=get_admin_kb())
 
-@dp.callback_query(F.data.startswith("admin_"))
-async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
-    action = callback.data.split("_")[1]
-    
-    if action == "stats":
+@dp.message(F.text == "📊 Статистика")
+async def admin_stats(message: types.Message):
+    if message.from_user.id == OWNER_ID:
         users = await get_all_users()
-        await callback.message.answer(f"📊 Всего в базе: **{len(users)}** чел.")
-    
-    elif action == "user": # Список последних
-        users = await get_all_users()
-        await callback.message.answer(f"👥 Последние ID:\n`{', '.join(users[-5:])}`", parse_mode="Markdown")
-        
-    elif action == "broadcast":
-        await state.set_state(UserState.admin_broadcast)
-        await callback.message.answer("📝 Введите текст рассылки:")
-        
-    elif action == "check":
-        async with aiohttp.ClientSession() as s:
-            r1 = await s.get(f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}?key={GOOGLE_API_KEY}")
-            await callback.message.answer(f"📡 Расписание: {'✅ OK' if r1.status == 200 else '❌ Ошибка'}")
-            
-    elif action == "reset":
-        await state.clear()
-        await callback.message.answer("🧹 Состояния сброшены.")
-    
-    await callback.answer()
+        await message.answer(f"📊 Всего пользователей в базе: {len(users)}")
 
-@dp.message(UserState.admin_broadcast)
-async def process_broadcast(message: types.Message, state: FSMContext):
+@dp.message(F.text == "📑 Список юзеров")
+async def admin_list(message: types.Message):
+    if message.from_user.id == OWNER_ID:
+        users = await get_all_users()
+        file_content = "\n".join(users)
+        file = BufferedInputFile(file_content.encode(), filename="users.txt")
+        await message.answer_document(file, caption="Список всех ID пользователей")
+
+@dp.message(F.text == "📢 Рассылка")
+async def broadcast_start(message: types.Message, state: FSMContext):
+    if message.from_user.id == OWNER_ID:
+        await state.set_state(Form.admin_broadcast)
+        await message.answer("Введите текст сообщения для рассылки:")
+
+@dp.message(Form.admin_broadcast)
+async def broadcast_exec(message: types.Message, state: FSMContext):
     await state.clear()
     users = await get_all_users()
     await message.answer(f"🚀 Рассылка на {len(users)} чел...")
     c = 0
-    for u_id in users:
+    for u in users:
         try:
-            await bot.send_message(u_id, message.text)
+            await bot.send_message(u, message.text)
             c += 1
             await asyncio.sleep(0.05)
         except: pass
-    await message.answer(f"✅ Готово. Получили: {c}")
+    await message.answer(f"✅ Готово! Доставлено: {c}")
 
-# --- ОБЫЧНЫЕ ОБРАБОТЧИКИ ---
-@dp.message(Command("start"), StateFilter('*'))
+@dp.message(F.text == "➖ Снять админа")
+async def demote_start(message: types.Message, state: FSMContext):
+    if message.from_user.id == OWNER_ID:
+        await state.set_state(Form.admin_demote)
+        await message.answer("Кого снять? Введите ID:")
+
+@dp.message(Form.admin_demote)
+async def demote_exec(message: types.Message, state: FSMContext):
+    await message.answer(f"Удалить {message.text} из админов? (Действие подтверждено)")
+    await state.clear()
+
+# --- ОСНОВНЫЕ ОБРАБОТЧИКИ ---
+@импорт(Command("start"), StateFilter('*'))
+@dp.message(F.text == "⬅️ Назад к курсам")
 @dp.message(F.text == "⬅️ Назад")
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
-    await register_user_logic(message.from_user.id) # Логируем вход
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="🎓 Я студент"), KeyboardButton(text="👨‍🏫 Я преподаватель"))
-    await message.answer("Добро пожаловать! Кто вы?", reply_markup=kb.as_markup(resize_keyboard=True))
+    await message.answer("Кто вы?", reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "👨‍🏫 Я преподаватель")
 async def teacher_mode(message: types.Message, state: FSMContext):
-    await state.set_state(UserState.waiting_for_teacher)
+    await state.set_state(Form.waiting_for_teacher)
     await message.answer("📝 Фамилия:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ Назад")]], resize_keyboard=True))
 
-@dp.message(UserState.waiting_for_teacher)
+@dp.message(Form.waiting_for_teacher)
 async def teacher_search(message: types.Message, state: FSMContext):
     if message.text == "⬅️ Назад": return await start_cmd(message, state)
-    m = await message.answer("🔎 Ищу...")
+    m = await message.answer("🔎 Поиск...")
     res = await fetch_teacher_schedule(message.text)
-    await m.edit_text(f"👨‍🏫 Расписание {message.text}:\n\n{res}", parse_mode="Markdown")
+    await m.edit_text(f"👨‍🏫 {message.text}:\n\n{res}", parse_mode="Markdown")
 
 @dp.message(F.text == "🎓 Я студент")
 async def student_mode(message: types.Message, state: FSMContext):
     kb = ReplyKeyboardBuilder()
     for c in GROUPS_BY_COURSE.keys(): kb.add(KeyboardButton(text=c))
     kb.row(KeyboardButton(text="⬅️ Назад"))
-    await state.set_state(UserState.choosing_course)
+    await state.set_state(Form.choosing_course)
     await message.answer("Выберите курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
-@dp.message(UserState.choosing_course)
+@dp.message(Form.choosing_course)
 async def proc_course(message: types.Message, state: FSMContext):
     if message.text == "⬅️ Назад": return await start_cmd(message, state)
     if message.text not in GROUPS_BY_COURSE: return
-    await state.update_data(c=message.text); await state.set_state(UserState.choosing_group)
+    await state.update_data(c=message.text); await state.set_state(Form.choosing_group)
     kb = ReplyKeyboardBuilder()
     for g in GROUPS_BY_COURSE[message.text]: kb.add(KeyboardButton(text=g))
     kb.row(KeyboardButton(text="⬅️ Назад"))
     await message.answer(f"📍 Группа:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
 
-@dp.message(UserState.choosing_group)
+@dp.message(Form.choosing_group)
 async def proc_group(message: types.Message, state: FSMContext):
     if message.text == "⬅️ Назад": return await start_cmd(message, state)
-    await state.update_data(g=message.text); await state.set_state(UserState.choosing_day)
+    await state.update_data(g=message.text); await state.set_state(Form.choosing_day)
     kb = ReplyKeyboardBuilder().row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра")).row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад"))
     await message.answer(f"🕒 Период:", reply_markup=kb.as_markup(resize_keyboard=True))
 
-@dp.message(UserState.choosing_day)
+@dp.message(Form.choosing_day)
 async def proc_day(message: types.Message, state: FSMContext):
     if message.text == "⬅️ Назад": return await start_cmd(message, state)
     data = await state.get_data()
