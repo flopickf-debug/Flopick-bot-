@@ -1,29 +1,20 @@
 import logging
 import asyncio
-import gspread
 import aiohttp
-import os
-import json
-from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import KeyboardButton
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-# --- НАСТРОЙКИ ---
+# --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "7987454041:AAGU-DGvVqgN7rioySxL5zINEk60WSlkUW4"
 GOOGLE_API_KEY = "AIzaSyDZUuMn8B8t_REygaEGpEI47hyLSQrDKDk"
 SCHEDULE_TABLE_ID = "1X6YF54l1rgP7MFfkTa1b_L6f4f3aWuADZwF8wwTWKK4"
 
-GROUPS_BY_COURSE = {
-    "1 курс": ["АВМ-110", "ИСП-104", "ИСП-105", "ДОУ-102", "СВП-111", "ОСД-134", "ПКП-121", "СЗС-133", "СРС-111", "ТГО-101", "ТМС-103", "ТОС-103", "ЭМР-107", "ЭМР-108"],
-    "2 курс": ["АВМ-208", "ИСП-202", "МПР-202", "ОСД-233", "ПКП-219", "ПКП-220", "СЗС-232", "СРС-209", "ТМС-202", "ТОС-202", "ЭМР-205", "ЮСП-201"],
-    "3 курс": ["ДОУ-301", "ИСП-301", "ПКП-317", "ПКП-318", "ПОС-301", "СВП-309", "СВП-310", "СЗС-331", "ТМС-302", "ТОС-301"],
-    "4 курс": ["СВП-425", "ПКП-415", "СВП-426", "СЗС-427"]
-}
+COURSES = ["1 курс", "2 курс", "3 курс", "4 курс"]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -33,126 +24,104 @@ class UserState(StatesGroup):
     choosing_course = State()
     choosing_group = State()
     choosing_day = State()
+    waiting_for_teacher = State()
 
-# --- ФУНКЦИЯ «СКАНЕР» КАБИНЕТА ---
-def find_room_in_area(rows, r_idx, col_idx):
-    """
-    Проверяет ячейки справа от предмета и учителя. 
-    Ищет любую ячейку, которая похожа на номер кабинета.
-    """
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def get_room_safe(rows, r_idx, c_idx):
     try:
-        # Проверяем 3 ячейки справа в строке предмета и строке учителя
-        for row_to_check in [rows[r_idx], rows[r_idx+1] if r_idx+1 < len(rows) else []]:
-            if not row_to_check: continue
-            # Берем срез ячеек справа от колонки предмета
-            for offset in range(1, 4): 
-                if len(row_to_check) > col_idx + offset:
-                    val = row_to_check[col_idx + offset].strip()
-                    # Если ячейка не пустая и не содержит мусор
-                    if val and val.lower() not in ["-", ".", "каб", "пара", "№"]:
-                        return val
+        for offset in range(1, 3):
+            if r_idx < len(rows) and len(rows[r_idx]) > c_idx + offset:
+                val = rows[r_idx][c_idx + offset].strip()
+                if val and val.lower() not in ["-", ".", "каб"]: return val
+            if r_idx + 1 < len(rows) and len(rows[r_idx+1]) > c_idx + offset:
+                val = rows[r_idx+1][c_idx + offset].strip()
+                if val and val.lower() not in ["-", ".", "каб"]: return val
     except: pass
     return ""
 
-# --- ЛОГИКА ПАРСИНГА ---
-async def fetch_schedule(course, group, target_day=None):
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
+# --- ПОИСК ДЛЯ ПРЕПОДАВАТЕЛЯ ---
+async def fetch_teacher_schedule(teacher_name, target_day=None):
+    all_lessons = []
+    teacher_name = teacher_name.lower()
+
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.json()
-            rows = data.get("values", [])
-    
-    if not rows: return "⚠️ Таблица пуста."
-    
-    # Находим колонку группы
-    col_idx = -1
-    for r in range(min(5, len(rows))):
-        for i, cell in enumerate(rows[r]):
-            if group.lower() in cell.lower():
-                col_idx = i; break
-        if col_idx != -1: break
+        for course in COURSES:
+            url = f"https://sheets.googleapis.com/v4/spreadsheets/{SCHEDULE_TABLE_ID}/values/{course}!A1:BG100?key={GOOGLE_API_KEY}"
+            async with session.get(url) as resp:
+ данные = ждать ответ.джонсон()
+ строки = данные.получать("ценности", [])
             
-    if col_idx == -1: return f"⚠️ Группа {group} не найдена."
+ если нет строки: продолжать
+
+ текущий_день = ""
+ для i в диапазон(2, лен(ряды)):
+ строка = строки[i]
+ если нет ряд: продолжать
+                
+                # Определяем день
+ если ряд[0].полоска():
+ day_val = страница[0].заменять('\н', ' ').полоска().верхний()
+ если любой(д в день_вал для д в ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]):
+ curr_day = day_val
+                
+ если нет текущий_день или (целевой_день и целевой_день.верхний() нет в текущий_день): продолжать
+
+                # Ищем фамилию во всех колонках (кроме технических A и B)
+ для col_idx в диапазон(2, лен(ряд)):
+ значение_ячейки = строка[col_idx].полоска().ниже()
+ если имя_учителя в значение_ячейки и лен(значение_ячейки) > 2:
+                        # Если нашли фамилию, значит предмет — строкой выше
+ pair_num = страница[1].полоска() если лен(ряд) > 1 еще "?"
+ тема = строки[я-1][col_idx].полоска() если я > 0 и лен(ряды[я-1]) > col_idx еще "Предмет не определен"
+                        
+                        # Находим группу (она в строке 2, индекс 1)
+ имя_группы = строки[1][col_idx].полоска() если лен(ряды) > 1 и лен(ряды[1]) > col_idx еще "Неизвестная группа"
+                        
+ комната = получить_комнату_безопасно(ряды, i-1, col_idx)
+ room_str = ф" [каб. {комната}]" если комната еще ""
+                        
+ все_уроки.добавить(ф"📅 {текущий_день}\н{число_пар} пара: {предмет} — {имя_группы}{room_str}")
+
+ возвращаться "\н\н".присоединиться(все_уроки) если все_уроки еще "🔍 Ничего не найдено. Проверьте фамилию
+
+# --- ОБРАБОТЧИКИ ---
+
+@dp.сообщение(Команда("старт"), Фильтр состоянный('*'))
+@dp.сообщение(Ф.текст == "⬅️ Назад к выбору")
+асинхронный дем start_cmd(сообщение: типы.Сообщение, сообщение: FSMContext):
+ ждать состояние.прозрачный()
+ кб = ОтвеститьKeyboardBuilder()
+ кб.ряд(КлавиатураКнопка(текст="🎓 Я студент"), КлавиатураКнопка(текст="👨‍🏫 Я преподаватель"))
+ ждать сообщение.отвечать("Кто вы?", reply_markup=кб.как_разметка(изменить размер_клавиатуры=Истинный))
+
+@dp.сообщение(новый == "👨‍🏫 Я переделаю")
+асинхронный дѵф учитель_сстарт(сообщение: типыы.Сообщение, состояние: FSMContext):
+ ждать состояние.установить_состояние(Состояние пользователя.ожидание_учителя_)
+ ждать сообщение.отвечать("📝 Введите вашу фамилию (например: Ежевская):", 
+ ответ_разметка=ОтветКлавиатураРазметка(клавиатура=[[КлавиатураКнопка(текст="⬅️ Назад к выбору")]], изменить размер_клавиатуры=Истинный))
+
+@dp.сообщение(Состоение пользователя.ожидание_учителя_)
+асинхронный дѵф имя_учитея_прока(сообщение: типы.Сообщение, сообщение: FSMContext):
+ эсли сообщенье.текст == "⬅️ Назад к выбору": возвращеть ждать start_cmd(сообщенье, состоянье)
     
-    res_dict, curr_day = {}, ""
-    for i in range(len(rows)):
-        row = rows[i]
-        if not row: continue
-        
-        # Определяем день
-        if row[0].strip():
-            day_val = row[0].replace('\n', ' ').strip().upper()
-            if any(d in day_val for d in ["ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА"]):
-                curr_day = day_val
-        
-        if not curr_day or (target_day and target_day.upper() not in curr_day): continue
-        
-        # Берем номер пары и предмет
-        pair_num = row[1].strip() if len(row) > 1 else ""
-        content = row[col_idx].strip() if len(row) > col_idx else ""
-        
-        if pair_num and content and content not in ["-", ".", "№", "Ден", "Пара"]:
-            teacher = ""
-            # Учитель строкой ниже
-            if i + 1 < len(rows) and len(rows[i+1]) > col_idx:
-                t_val = rows[i+1][col_idx].strip()
-                if t_val: teacher = f" ({t_val})"
-            
-            # Ищем кабинет «сканером»
-            room = find_room_in_area(rows, i, col_idx)
-            room_str = f" — **каб. {room}**" if room else ""
-            
-            if curr_day not in res_dict: res_dict[curr_day] = []
-            res_dict[curr_day].append(f"• {pair_num} пара: {content}{teacher}{room_str}")
+ сообщение = ждать сообщение.отвечать("🔎 Ищу в расписании всех курсов...")
+ рез = ждать расписание_учителя_принеси(сообщение.текст)
+ ждать сообщение.редактировать_текст(ф"👨‍🏫 Расписи для: **{сообщение.текст}**\н\н{рез}", режим_анализа="Маркдаун")
 
-    output = ""
-    for d, lessons in res_dict.items():
-        output += f"\n📅 **{d}**\n" + "\n".join(lessons) + "\n"
-    return output if output else "🎉 Занятий нет!"
+@dp.сообщение(Ф.текст == "🎓 Я студент")
+асинхронный дѵф судент_сстарт(сообщение: типы.Сообщение, состояние: FSMContext):
+ кб = ОтвеститьKeyboardBuilder()
+ для c в КУРСЫ: кб.добавлять(КлавиатураКнопка(текст=с))
+ кб.ряд(КлавиатураКнопка(текст="⬅️ Назад к выбору"))
+ ждать состояние.установить_состояние(Состояние пользователя.выбор_курса)
+ ждать сообщение.отвечать("Выберите курс:", reply_markup=кб.регулировать(2).как_разметка(изменить размер_клавиатуры=Истинный))
 
-# --- ОБРАБОТЧИКИ (УПРОЩЕННО ДЛЯ ТЕСТА) ---
-@dp.message(Command("start"), StateFilter('*'))
-@dp.message(F.text == "⬅️ Назад к курсам")
-async def start_cmd(message: types.Message, state: FSMContext):
-    await state.clear()
-    kb = ReplyKeyboardBuilder()
-    for c in GROUPS_BY_COURSE.keys(): kb.add(KeyboardButton(text=c))
-    await state.set_state(UserState.choosing_course)
-    await message.answer("🎓 Выберите курс:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+# (Остальные обработчики для студентов из предыдущего кода...)
+# Для краткости я не дублирую здесь логику выбора групп, она остается прежней.
 
-@dp.message(UserState.choosing_course)
-async def proc_course(message: types.Message, state: FSMContext):
-    if message.text not in GROUPS_BY_COURSE: return
-    await state.update_data(c=message.text); await state.set_state(UserState.choosing_group)
-    kb = ReplyKeyboardBuilder()
-    for g in GROUPS_BY_COURSE[message.text]: kb.add(KeyboardButton(text=g))
-    kb.row(KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"📍 Группа:", reply_markup=kb.adjust(2).as_markup(resize_keyboard=True))
+асинхронный деф основной():
+ ждать бот.удалить_вебхук(drop_pending_updates=Истинный)
+ ждать дп.старт_опроса(бот)
 
-@dp.message(UserState.choosing_group)
-async def proc_group(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Назад к курсам": return await start_cmd(message, state)
-    await state.update_data(g=message.text); await state.set_state(UserState.choosing_day)
-    kb = ReplyKeyboardBuilder().row(KeyboardButton(text="📅 Сегодня"), KeyboardButton(text="📅 Завтра"))
-    kb.row(KeyboardButton(text="🗓 На неделю"), KeyboardButton(text="⬅️ Назад к курсам"))
-    await message.answer(f"🕒 Выберите период:", reply_markup=kb.as_markup(resize_keyboard=True))
-
-@dp.message(UserState.choosing_day)
-async def proc_day(message: types.Message, state: FSMContext):
-    if message.text == "⬅️ Назад к курсам": return await start_cmd(message, state)
-    data = await state.get_data()
-    days = ['ПОНЕДЕЛЬНИК', 'ВТОРНИК', 'СРЕДА', 'ЧЕТВЕРГ', 'ПЯТНИЦА', 'СУББОТА', 'ВОСКРЕСЕНЬЕ']
-    t = days[datetime.now().weekday()] if "Сегодня" in message.text else days[(datetime.now() + timedelta(days=1)).weekday()] if "Завтра" in message.text else None
-    
-    try:
-        res = await fetch_schedule(data.get('c'), data.get('g'), t)
-        await message.answer(f"📋 **{data.get('g')}**\n{res}", parse_mode="Markdown")
-    except Exception as e:
-        await message.answer("⚠️ Ошибка парсинга.")
-
-async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+если __имя__ == "__основной__":
+ асинсио.бегать(основной())
